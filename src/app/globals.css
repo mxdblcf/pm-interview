@@ -1,26 +1,262 @@
 @import "tailwindcss";
+@import "highlight.js/styles/atom-one-light.min.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Force light mode */
+:root,
+html {
+  color-scheme: light only !important;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* ─── Eye-Comfort Anime Palette ─────────────────── */
+  --color-background: #f5f0e8;
+  --color-foreground: #3a3640;
+  --color-primary: #7c6adb;
+  --color-primary-light: #9d8fe6;
+  --color-primary-pale: #e8e3f5;
+  --color-primary-glow: rgba(124, 106, 219, 0.10);
+  --color-accent: #d97896;
+  --color-accent-light: #e8a0b5;
+  --color-accent-pale: #f5e3ea;
+  --color-surface: #faf6ef;
+  --color-surface-hover: #f0ebe2;
+  --color-surface-active: #e8e3da;
+  --color-border: #e0d9cc;
+  --color-border-hover: #cfc7b8;
+  --color-muted: #8a8490;
+  --color-card: #faf6ef;
+  --color-sidebar: #f8f3eb;
+  --color-pink: #d97896;
+  --color-sky: #5ba8c8;
+  --color-mint: #5db89a;
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/* ─── Base ─────────────────────────────────────────── */
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  overflow: hidden;
+}
+
+/* Scrollbar — soft warm tones */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d5cfc4;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9d8fe6;
+}
+
+/* ─── Markdown Prose ──────────────────────────────── */
+.prose {
+  color: #4a4552;
+  line-height: 1.85;
+  font-size: 0.95rem;
+}
+
+.prose h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #3a3640;
+  margin-top: 0;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 2px solid #e8e3f5;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #7c6adb, #d97896);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.prose h2 {
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: #6b5cc0;
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #e8e3f5;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.prose h2::before {
+  content: "✦";
+  color: #d97896;
+  font-size: 0.75em;
+}
+
+.prose h3 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #5a4ca8;
+  margin-top: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #6b5cc0;
+  margin-top: 1.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.prose p {
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.prose a {
+  color: #7c6adb;
+  text-decoration: underline;
+  text-decoration-color: #b8aee6;
+  text-underline-offset: 2px;
+  transition: color 0.2s;
+}
+.prose a:hover {
+  color: #d97896;
+}
+
+.prose strong {
+  color: #3a3640;
+  font-weight: 700;
+}
+
+.prose blockquote {
+  border-left: 3px solid #b8a0e0;
+  padding: 0.75rem 1rem;
+  margin: 1rem 0;
+  background: linear-gradient(135deg, #f0ebf5, #f5e8ee);
+  border-radius: 0 12px 12px 0;
+  color: #6b5b7a;
+}
+
+.prose blockquote p {
+  margin: 0.25rem 0;
+}
+
+.prose ul,
+.prose ol {
+  padding-left: 1.5rem;
+  margin: 0.75rem 0;
+}
+
+.prose li {
+  margin: 0.35rem 0;
+}
+
+.prose li::marker {
+  color: #7c6adb;
+}
+
+.prose hr {
+  border-color: #e0d9cc;
+  margin: 2rem 0;
+}
+
+/* Code blocks */
+.prose pre {
+  background: #faf6ef !important;
+  border: 1px solid #e0d9cc;
+  border-radius: 14px;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  line-height: 1.75;
+  position: relative;
+  box-shadow: 0 2px 12px rgba(124, 106, 219, 0.05);
+}
+
+.prose pre::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #7c6adb, #d97896, #5ba8c8);
+  border-radius: 14px 14px 0 0;
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
+.prose :not(pre) > code {
+  background: #e8e3f5;
+  color: #6b5cc0;
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+/* Tables */
+.prose table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 1rem 0;
+  font-size: 0.875rem;
+  border: 1px solid #e0d9cc;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.prose thead {
+  background: linear-gradient(135deg, #e8e3f5, #f5e3ea);
+}
+
+.prose th {
+  padding: 0.75rem 1rem;
+  text-align: left;
+  font-weight: 700;
+  color: #6b5cc0;
+  border-bottom: 1px solid #e0d9cc;
+}
+
+.prose td {
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid #ece7df;
+}
+
+.prose tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.prose tr:hover {
+  background: #f0ebe2;
+}
+
+/* ─── Decorative Background ───────────────────────── */
+.anime-bg {
+  background:
+    radial-gradient(ellipse at 10% 20%, rgba(124, 106, 219, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse at 90% 80%, rgba(217, 120, 150, 0.04) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(91, 168, 200, 0.03) 0%, transparent 50%),
+    var(--color-background);
+}
+
+/* Floating decorative dots */
+.dot-pattern {
+  background-image: radial-gradient(
+    circle,
+    rgba(124, 106, 219, 0.05) 1px,
+    transparent 1px
+  );
+  background-size: 24px 24px;
 }
