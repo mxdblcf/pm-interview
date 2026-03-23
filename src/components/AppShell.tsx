@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import Sidebar from "./Sidebar";
 import MarkdownRenderer from "./MarkdownRenderer";
 import TableOfContents from "./TableOfContents";
 import WelcomeScreen from "./WelcomeScreen";
+import { extractHeadings } from "@/lib/toc";
 
 interface TocItem {
   id: string;
@@ -37,36 +38,8 @@ export default function AppShell({ groups }: AppShellProps) {
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
   const [contentData, setContentData] = useState<ContentItem | null>(null);
   const [loading, setLoading] = useState(false);
-  const [tocItems, setTocItems] = useState<TocItem[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // Extract headings from DOM after render — ensures IDs match rehype-slug exactly
-  useEffect(() => {
-    if (!contentData || loading) {
-      setTocItems([]);
-      return;
-    }
-
-    // Small delay so the markdown has time to render into the DOM
-    const timer = setTimeout(() => {
-      const container = scrollRef.current;
-      if (!container) return;
-
-      const headings = container.querySelectorAll("h1, h2, h3, h4");
-      const items: TocItem[] = [];
-      headings.forEach((el) => {
-        const id = el.getAttribute("id");
-        const text = el.textContent?.trim() || "";
-        const level = parseInt(el.tagName.charAt(1), 10);
-        if (id && text) {
-          items.push({ id, text, level });
-        }
-      });
-      setTocItems(items);
-    }, 150);
-
-    return () => clearTimeout(timer);
-  }, [contentData, loading]);
+  const tocItems: TocItem[] = contentData ? extractHeadings(contentData.content) : [];
 
   const handleSelect = useCallback(async (slug: string) => {
     setActiveSlug(slug);
