@@ -57,13 +57,6 @@ export default function TableOfContents({ items, scrollContainerRef }: TableOfCo
     };
   }, [items, scrollContainerRef]);
 
-  useEffect(() => {
-    setMobileOpen(false);
-    if (items.length === 0) {
-      setActiveId("");
-    }
-  }, [items]);
-
   if (items.length === 0) return null;
 
   const minLevel = Math.min(...items.map((i) => i.level));
