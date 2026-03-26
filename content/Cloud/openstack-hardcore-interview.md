@@ -1,733 +1,762 @@
+# OpenStack 技术面试深度手册
+
+> **适用场景**：高级云平台工程师 / 私有云架构师 / SRE 技术面试  
+> **使用方法**：先通读方法论和"一句话定位"，再按模块深入，重点背熟第六章故障矩阵和第四章备份原理。
+
 ---
-title: "OpenStack 面试宝典（架构 / 备份 / 组件 / 排障 / 私有云）"
-category: "Cloud"
-order: 1
+
+## 阅读指引与方法论
+
+**核心目标**：这不是一份背诵清单，而是帮助你建立系统性认知框架的技术手册。面试官真正想听的，不是你能列出多少组件名，而是你能否清晰描述「**状态在谁手里、流量走哪条路径、故障如何收敛**」。
+
+### 四个总纲
+
+1. **架构本质**：OpenStack 是「控制面分布式系统 + 数据面多驱动系统」的组合。控制面关心状态一致、调度和 HA；数据面关心虚机性能、网络转发、存储时延和失败恢复。
+2. **真实难点**：不是 API 数量多，而是 RabbitMQ、MariaDB、Keystone Fernet key 轮换、Neutron MTU、Placement 资源视图一致性与底层存储的综合联动。
+3. **面试失分点**：给不出端到端链路描述；把快照当备份；分不清控制面故障和数据面故障；无法解释 `No valid host` 根因；把 Neutron 说成「就是建个网络」。
+4. **私有云成败**：前期网络规划、故障域设计、自动化部署、备份恢复演练，远比「把服务跑起来」重要。
+
+### 面试高分策略
+
+| # | 策略 | 说明 |
+|---|------|------|
+| ① | 先给结论，再展开原理 | 不要一开口就列组件名 |
+| ② | 用链路描述替代罗列 | 「一包流量怎么走」比「Neutron 有 ML2」更有说服力 |
+| ③ | 主动提风险和坑 | 「这里经典问题是 MTU 没算 overlay 头」体现真实经验 |
+| ④ | 说清楚边界 | OpenStack 负责什么、不负责什么，同样重要 |
+| ⑤ | 结合规模和场景 | 百节点和千节点的架构选择是不同的 |
+
 ---
 
-# OpenStack 面试宝典
+## 一、30 秒定位答法
 
-> 目标：这是一份既能拿去面试，也能拿去做私有云规划、上线排障、容灾演练的高密度手册。  
-> 阅读建议：先背 `1. 一句话打穿`、`5. 备份原理`、`7. 常见报错`、`8. 私有云搭建注意事项`，再看细节。  
-> 方法论：不要把 OpenStack 当成“装一堆服务”。它本质上是一个把计算、网络、存储、身份、调度、配额、多租户和高可用编排在一起的 IaaS 控制面。
+### 基础层（30 秒）
 
-先抓住 4 个总纲：
+> OpenStack 是一个 IaaS 云平台控制面，核心是 Keystone 做身份认证和服务目录，Nova 管计算生命周期，Neutron 管网络虚拟化，Cinder/Glance/Swift 分别管块存储、镜像和对象存储。通过 RabbitMQ 异步消息、MariaDB 持久化状态、Placement 维护资源视图，再经 OVS/OVN 和 Ceph 等底层组件把 API 请求变成真实的资源创建、调度、挂载和转发。
 
-- 一句话定位：OpenStack 不是单体软件，而是一组通过 API、消息总线、数据库和驱动框架拼起来的云操作系统。
-- 核心矛盾：面试真正要听的不是组件名，而是你能不能说清“状态在谁手里、流量走哪条路径、故障怎么收敛”。
-- 最容易挂的地方：不是单个 API，而是 RabbitMQ、MariaDB、Keystone Fernet key、Neutron MTU、Placement 资源视图和底层存储一致性。
-- 私有云成败关键：前期网络规划、故障域设计、自动化部署、备份恢复演练，比“把服务跑起来”重要得多。
+### 进阶层（追问时）
 
-## 1. 一句话打穿
+> OpenStack 的架构分两个平面：控制平面负责状态一致、调度决策、认证授权和 HA 协同；数据平面负责虚机运行、网络封装转发、块设备 IO 和存储复制。两者解耦的关键是消息总线和资源视图（Placement）。真正难运维的不是单个组件，而是多租户、overlay、存储一致性和控制面依赖之间的综合联动。
 
-30 秒版本可以这样答：
+---
 
-> OpenStack 是一个 IaaS 云平台控制面，核心是 Keystone 做身份和服务目录，Nova 管计算生命周期，Neutron 管网络虚拟化，Cinder/Glance/Swift 管块存储、镜像和对象存储，再通过 RabbitMQ、MariaDB、Placement、OVS 或 OVN、Ceph 等基础组件把请求变成真实的资源创建、调度、挂载和转发。
+## 二、总体架构与核心原理
 
-再进一层：
+### 2.1 控制面 / 数据面分层架构
 
-> OpenStack 的难点不在于 API 多，而在于它是“控制面分布式系统 + 数据面多驱动系统”的组合。控制面关心状态一致、调度和 HA；数据面关心虚机性能、网络转发、存储时延和失败恢复。
-
-## 2. OpenStack 到底是什么
-
-从抽象层看，OpenStack 提供 4 类能力：
-
-1. 多租户资源抽象：实例、网络、子网、路由器、卷、镜像、浮动 IP、配额、项目、域。
-2. 统一控制面：REST API、认证授权、服务发现、状态管理、调度。
-3. 可插拔驱动：hypervisor、网络机制驱动、存储后端、身份联邦、LB、裸金属。
-4. 自动化运营基础：高可用、监控、日志、升级、备份、容量规划、故障域隔离。
-
-你可以把它理解成一层“云资源编排操作系统”：
-
-- 上层面对用户暴露 API、CLI、Horizon、Terraform/SDK。
-- 中间层做认证、配额、调度、状态写入、异步任务分发。
-- 下层通过 libvirt、OVS/OVN、存储驱动、Ceph/FC/iSCSI/NFS 等落到真实资源。
-
-## 3. 核心架构原理
-
-### 3.1 总体架构图
-
-```text
-+----------------------------------------------------------------------------------+
-| 用户入口                                                                         |
-| User / CLI / SDK / Terraform -> HAProxy / Keepalived / VIP -> Horizon / API     |
-+----------------------------------------------------------------------------------+
-                                         |
-                                         v
-+----------------------------------------------------------------------------------+
-| 控制平面 Control Plane                                                           |
-| Keystone | Nova API | Neutron | Cinder / Glance | Placement | Octavia | Heat    |
-| RabbitMQ | MariaDB / Galera | Memcached | Nova Cells v2                         |
-+----------------------------------------------------------------------------------+
-          |                                 |                                 |
-          v                                 v                                 v
-+---------------------------+  +--------------------------------+  +----------------------------+
-| Compute Node              |  | Network Path                   |  | Storage Backend            |
-| nova-compute              |  | OVS / OVN / VXLAN / GENEVE     |  | Ceph RBD / FC / iSCSI     |
-| libvirt / qemu-kvm        |  | security group / FIP / NAT     |  | NFS / LVM / Swift         |
-+---------------------------+  +--------------------------------+  +----------------------------+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  用户入口层                                                      │
+│  User / CLI / SDK / Terraform                                   │
+│       → HAProxy + Keepalived (VIP) → Horizon / REST API         │
+├─────────────────────────────────────────────────────────────────┤
+│  控制平面 Control Plane                                          │
+│  Keystone │ Nova-API │ Neutron Server │ Cinder │ Glance         │
+│  Placement │ Octavia │ Heat │ Barbican │ Ironic                 │
+│  ──────────────────────────────────────────────────────────     │
+│  RabbitMQ (AMQP) │ MariaDB/Galera │ Memcached │ Cells v2       │
+├──────────────┬──────────────────────┬──────────────────────────┤
+│ Compute Node │ Network Data Plane   │ Storage Backend          │
+│ nova-compute │ OVS / OVN            │ Ceph RBD / FC / iSCSI   │
+│ libvirt/QEMU │ VXLAN / GENEVE       │ NFS / LVM / Swift        │
+│              │ SG / FIP / NAT / DVR │ Cinder-volume driver     │
+└──────────────┴──────────────────────┴──────────────────────────┘
 ```
 
-看这张图时记住两个词：`状态` 和 `流量`。状态主要存在数据库、消息队列、Placement、Keystone key、Neutron/Nova/Cinder 的资源映射里；真实流量则走虚机、虚拟交换机、隧道、存储后端和外部网络。
+看这张图时始终抓住两个词：**状态**（主要在 DB、MQ、Placement、Keystone key、各服务资源映射里）和**流量**（走虚机、虚拟交换机、隧道、存储后端和外部网络）。
 
-### 3.2 控制平面和数据平面为什么一定要分开
+### 2.2 控制平面与数据平面为什么必须分离
 
-控制平面负责：
+| 维度 | 控制平面 | 数据平面 |
+|------|----------|----------|
+| 核心目标 | 状态一致、调度正确、认证授权 | 高吞吐、低时延、故障快速收敛 |
+| 容错策略 | 支持重试、补偿、幂等写入 | 快速失败、本地自治、流量保持 |
+| 扩展方式 | 水平扩展 API/Conductor/Scheduler | 横向增加 Compute/网络/存储节点 |
+| 依赖关系 | 依赖 DB、MQ、Keystone | 依赖本地 libvirt、OVS、块设备映射 |
+| 故障影响 | 控制面故障 → 新建操作失败，已运行 VM 不受影响 | 数据面故障 → 直接影响业务流量和 IO |
 
-1. API 接入、认证授权、配额检查。
-2. 资源建模和状态持久化。
-3. 调度决策和异步编排。
-4. 对底层驱动下发任务并跟踪结果。
+**面试标准答法**：控制面可以接受事务逻辑和重试带来的额外时延，但数据面更怕抖动、尾时延和丢包。两者混部时，高并发流量会抢占 CPU/内存/带宽，导致控制面响应变慢，进而引发 RabbitMQ 超时、数据库慢查询和调度误判。分离是为了让两者都能在各自最优的参数下工作。
 
-数据平面负责：
+### 2.3 虚机创建全链路（Boot Instance）
 
-1. 虚机真正启动和停止。
-2. vNIC 的接入、VXLAN 或 GENEVE 封装、NAT 和 ACL。
-3. 卷挂载、镜像缓存、块数据读写。
-4. 实际南北向和东西向流量转发。
+这是最高频考点，答法不是列步骤，而是**描述「每一步的边界责任和潜在失败点」**。
 
-面试官如果追问“为什么要分开”，你就答：
-
-> 因为 API 的一致性和虚机流量的性能目标完全不同。控制面可以接受更多事务逻辑和重试，但数据面更怕抖动、尾时延和丢包。把两者混在一起，最终会同时失去稳定性和性能。
-
-### 3.3 一台虚机是怎么被创建出来的
-
-最常考的不是组件介绍，而是 `boot instance` 全链路。
-
-```text
+```
 Client
-  |
-  v
-Nova API
-  |
-  +--> Keystone       : 认证 / token 校验
-  +--> Placement      : 查询 inventory / traits
-  |
-  v
-Nova Scheduler
-  |
-  v
-Nova Conductor
-  |
-  +--> Neutron        : 创建端口 / 安全组 / binding
-  +--> Glance         : 镜像元数据 / 镜像拉取
-  +--> Cinder         : 卷创建 / 挂载 / boot from volume
-  |
-  v
+  │
+  ▼
+nova-api ─── Keystone Token 校验 ─── 配额 / Flavor / 镜像 / AZ 参数校验
+  │
+  ▼
+Placement API ── 查询 resource provider inventory / traits / aggregates
+  │
+  ▼
+nova-scheduler ── FilterScheduler: 过滤 → 权重排序 → 选定目标 Host
+  │
+  ▼
+nova-conductor ── 编排控制流，向目标 Cell 下发任务（避免 compute 直写 DB）
+  │
+  ├──► Neutron: 创建 Port → 绑定 (PortBinding) → 安全组规则下发
+  │
+  ├──► Glance: 获取镜像元数据 → nova-compute 拉取镜像到本地或后端
+  │
+  ├──► Cinder: 创建 / 映射 boot volume（若 boot-from-volume）
+  │
+  ▼
 nova-compute
-  |
-  +--> libvirt / qemu : 生成 domain XML 并启动虚机
-  +--> Storage        : Ceph / NFS / SAN / LVM
+  ├──► Placement: 提交 Allocation
+  ├──► libvirt: 生成 domain XML → qemu-kvm 启动虚机
+  └──► 状态回写 DB: BUILDING → ACTIVE / ERROR
 ```
 
-主链路可以压成 8 个动作：`认证`、`参数校验`、`资源视图查询`、`主机调度`、`端口准备`、`镜像或卷准备`、`libvirt 启动`、`状态回写`。
-
-完整过程通常是：
-
-1. 用户请求到 `nova-api`，先通过 Keystone 校验 token。
-2. Nova 查询配额、镜像、Flavor、可用区、网络和卷信息。
-3. Scheduler 根据 Placement 的资源视图、traits、aggregates、NUMA/SR-IOV 等条件选主机。
-4. Conductor 负责在控制面编排，向目标 cell / compute 下发任务。
-5. Compute 节点向 Neutron 申请端口绑定，准备 tap、bridge、security group。
-6. 如果是镜像启动，Compute 从 Glance 拉镜像，通常会落到本地缓存或后端存储。
-7. 如果是卷启动，Cinder 把块设备映射到目标宿主机。
-8. libvirt 生成 domain XML，qemu-kvm 启动虚机，状态写回数据库。
-
-一句面试总结：
-
-> Nova 自己不直接管网络和磁盘数据，它更像一个总调度器，把“算、网、存”串起来。
-
-## 4. 组件原理，一次讲透
-
-### 4.1 Keystone：为什么说它不只是“登录服务”
-
-Keystone 负责 3 件事：
-
-1. 认证：用户、服务、联邦身份、应用凭证。
-2. 授权：domain、project、role、policy。
-3. 服务目录：告诉客户端每个服务的 endpoint 在哪里。
-
-核心概念：
-
-1. `Domain` 是身份管理边界。
-2. `Project` 是租户和资源隔离边界。
-3. `Role + policy` 决定一个请求到底能不能做。
-4. `Service catalog` 让客户端拿 token 后知道应该去访问哪个 API 地址。
-
-面试高频点：
-
-1. Fernet token 为什么常用。
-   原因是 token 不需要持久化写库，长度更小，验证成本低。
-2. 多节点 Keystone 最大坑是什么。
-   不是 endpoint，而是 `fernet key` 分发和轮换必须严格同步。
-3. Keystone 挂了会怎样。
-   老 token 可能还能在部分链路继续用，但新认证、服务发现、很多控制面操作会大量失败。
-
-要点记忆：
-
-> Keystone 是“认证 + 授权 + 服务目录”，不是“数据库里查个用户名密码”那么简单。
-
-### 4.2 Nova：计算服务的本质是状态机
-
-Nova 不是 hypervisor 本身，Nova 是计算控制面。它真正协调的是：
-
-1. 实例期望状态和实际状态。
-2. 调度约束和资源视图。
-3. cell 内消息路由和故障隔离。
-4. libvirt / Hyper-V / VMware 等底层驱动调用。
-
-你要能讲清几个角色：
-
-1. `nova-api`：接请求。
-2. `nova-scheduler`：挑主机。
-3. `nova-conductor`：避免 compute 直接写数据库，承担控制面编排。
-4. `nova-compute`：真正跟 hypervisor 打交道。
-5. `placement-api`：资源库存、traits、allocations 的事实来源。
-6. `cells v2`：把大规模部署按 cell 切开，降低数据库和消息风暴。
-
-Cells v2 的本质：
-
-1. 把计算节点按 cell 分片。
-2. API 层面维持全局入口。
-3. 每个 cell 有自己的消息和数据库边界。
-4. `cell0` 专门放调度失败、无法创建成功的实例记录。
-
-一句拿分的话：
-
-> Nova 的扩展性核心不只是多台 compute，而是 `cells v2 + placement + conductor` 这套状态分片和编排机制。
-
-### 4.3 Neutron：最容易被问炸的一层
-
-Neutron 管的是“网络意图”，不直接等于“交换机配置”。
-
-它负责：
-
-1. Network / Subnet / Port / Router / Floating IP 模型。
-2. IPAM 和 DHCP。
-3. Security Group、ACL、QoS。
-4. 二层接入、三层路由、NAT、metadata 接入。
-5. 通过 ML2 和机制驱动把抽象模型落到 OVS、OVN、SR-IOV 等实现。
-
-你要分清两层：
-
-1. Neutron server：控制面，负责资源模型和状态。
-2. Agent 或 OVN controller：数据面，把配置变成真实转发规则。
-
-常见实现路线：
-
-1. `ML2 + OVS`：传统而经典，常见 bridge 是 `br-int`、`br-tun`、`br-ex`。
-2. `ML2 + OVN`：把二三层逻辑下沉到 OVN，控制模型更统一，新建云里很常见。
-
-面试一定要说：
-
-> Neutron 真正难的不是建一个网络，而是要在多宿主机、多租户、overlay、浮动 IP、ACL 和 MTU 这些限制下，保证连通性、隔离性和可运维性。
-
-### 4.4 Cinder：块存储控制面，不是“磁盘本体”
-
-Cinder 负责：
-
-1. 卷、快照、备份、类型、QoS、复制策略。
-2. 调度到具体后端。
-3. 通过 driver 跟 Ceph、FC、iSCSI、NFS、LVM 等交互。
-4. 控制 attach / detach / extend / retype / migrate。
-
-关键角色：
-
-1. `cinder-api`
-2. `cinder-scheduler`
-3. `cinder-volume`
-4. `cinder-backup`
-
-要点：
-
-1. Cinder 自己不是存储介质，而是存储编排层。
-2. 真正数据落在哪，要看后端 driver。
-3. 卷的高可用不由 Cinder 自动保证，本质上取决于后端存储的能力。
-
-### 4.5 Glance：镜像元数据和分发中心
-
-Glance 负责：
-
-1. 镜像元数据、格式、可见性、校验。
-2. 镜像存储后端接入。
-3. 镜像分发给 compute。
-
-面试时要补一句：
-
-> Glance 的瓶颈不一定是 API，而经常是镜像后端吞吐、本地缓存策略、镜像格式转换和大规模并发拉取。
-
-### 4.6 Placement：为什么 `No valid host` 常常要先看它
-
-Placement 维护的是资源提供者视图：
-
-1. vCPU、MEMORY_MB、DISK_GB。
-2. PCI、SR-IOV VF、NUMA、hugepage 等 trait。
-3. aggregates、allocations、inventories。
-
-调度失败往往不是 compute 真的死了，而是：
-
-1. Placement 视图不正确。
-2. trait / aggregate 不匹配。
-3. reserved、allocation_ratio、inventory 没配好。
-
-一句话：
-
-> Placement 不是“附属组件”，它是 Nova 调度的资源真相来源。
-
-### 4.7 其他组件，面试官爱追问什么
-
-`Horizon`
-
-1. Web 控制台。
-2. 常被误以为是核心，其实它只是 UI，不是底层控制逻辑。
-
-`Heat`
-
-1. OpenStack 的编排服务。
-2. 面试可类比成“原生的基础设施模板编排层”。
-
-`Octavia`
-
-1. 负载均衡服务。
-2. 背后常通过 amphora VM 或 provider driver 实现。
-
-`Barbican`
-
-1. 密钥和证书管理。
-2. 适合讲 TLS 私钥、卷加密、服务端证书。
-
-`Ironic`
-
-1. 裸金属即服务。
-2. 如果面试官问“OpenStack 能不能管物理机”，这就是答案。
-
-## 5. 备份原理与容灾原理
-
-### 5.1 先把概念分清：快照、备份、复制不是一回事
-
-| 能力 | 本质 | 典型用途 | 风险 |
-| --- | --- | --- | --- |
-| 快照 Snapshot | 某一时刻的逻辑一致性点 | 快速回滚、制作模板、短期保护 | 通常依赖同一后端，后端故障可能一起丢 |
-| 备份 Backup | 把数据导出到另一份可恢复介质 | 长期保存、跨故障域恢复 | 恢复时间可能长 |
-| 复制 Replication | 持续把数据同步或异步到另一位置 | 容灾、高可用、异地恢复 | 成本高，对带宽和一致性要求高 |
-
-面试官如果问“卷快照能不能当备份”，正确答案是：
-
-> 可以作为备份链路的一环，但不能把同一存储池里的快照当成完整备份，因为它没有真正脱离原故障域。
-
-### 5.2 OpenStack 该备份什么
-
-真正需要备份的是 4 层：
-
-1. 控制面状态：
-   MariaDB / Galera 数据库、RabbitMQ definitions、Keystone Fernet keys、配置文件、证书、OVN NB/SB DB、Placement 数据。
-2. 镜像层：
-   Glance 镜像和元数据。
-3. 数据卷层：
-   Cinder 卷、快照、备份记录，以及底层 Ceph/SAN/NFS 的真实数据。
-4. 业务层：
-   虚机内应用数据、数据库、配置、日志。
-
-面试加分点：
-
-> OpenStack 备份不是只备一个数据库。控制面恢复只能让云“知道资源还在”，不代表租户数据真的可恢复。
-
-### 5.3 Cinder 备份原理
-
-```text
-运行中的卷 Volume
-     |
-     +--> 可选：先做 Snapshot，得到一致性点
-     |
-     v
-cinder-backup
-     |
-     +--> chunk / compress / stream
-     |
-     v
-Backup Backend
-(Swift / Ceph / NFS / Posix)
-     |
-     +--> DB 里记录 backup chain 和元数据
-     |
-     v
-Restore
--> 写回新卷或目标卷
+| 步骤 | 说明 |
+|------|------|
+| 认证 | Keystone 校验 Token，确认调用方身份和权限 |
+| 参数校验 | Flavor、Image、Network、AZ、Server Group 策略合法性 |
+| 资源查询 | Placement 返回满足条件的 Resource Provider 列表（含 traits、aggregates） |
+| 调度选主 | FilterScheduler 执行过滤器链（RAM、CPU、磁盘、NUMA、PCI、亲和/反亲和），再按权重选出最优 Host |
+| 端口准备 | Neutron 创建 Port，触发 ML2 机制驱动绑定，OVS/OVN 下发流表/ACL |
+| 存储准备 | 镜像缓存或 boot volume attach，块设备映射到宿主机 |
+| libvirt 启动 | 生成 domain XML（含 CPU pinning、hugepage、SR-IOV vf 等），qemu-kvm 运行 |
+| 状态回写 | nova-compute 上报实例状态，Placement 确认 allocation，DB 更新 |
+
+> **面试加分项 — 常见失败点**
+> - 步骤 3：Placement inventory 视图陈旧或 reserved 配置过高 → `No valid host`
+> - 步骤 4：host aggregate / AZ 约束把所有候选主机排空 → `Exhausted all hosts`
+> - 步骤 5：ML2 agent down 或 physnet 映射错误 → `PortBindingFailed`
+> - 步骤 6：Ceph 集群降级 / iSCSI session 断开 → volume attach 卡住
+> - 步骤 7：CPU 型号不支持 / hugepage 未预留 / libvirt XML 非法 → 启动失败
+
+---
+
+## 三、核心组件深度解析
+
+### 3.1 Keystone — 认证、授权与服务发现
+
+Keystone 承担三个职责，缺一不可：**① 认证（Authentication）**、**② 授权（Authorization）**、**③ 服务目录（Service Catalog）**。将其简单理解为「登录服务」是面试失分的典型错误。
+
+#### 核心概念
+
+| 概念 | 作用 | 面试关注点 |
+|------|------|------------|
+| Domain | 身份管理边界，支持多 LDAP/AD 联邦 | 多租户隔离的顶层边界 |
+| Project | 资源隔离和配额的基本单位 | 租户资源、Network、Volume 归属 |
+| Role + Policy | RBAC 授权模型，policy.yaml 控制 API 权限 | 细粒度权限裁剪，最小权限原则 |
+| Token (Fernet) | 携带用户身份和权限的短期凭证 | 无状态、不写 DB、轮换机制 |
+| Service Catalog | 各组件 endpoint 的注册表 | 客户端拿 Token 后如何发现 API 地址 |
+| Application Credential | 服务账号凭证，不依赖用户密码 | CI/CD、自动化工具认证首选 |
+
+#### Fernet Token 原理与高可用关键
+
+Fernet Token 是对称加密的，验证不需要查库，这是相对 UUID Token 的核心优势。但多节点 Keystone 部署中，**Fernet key 的分发和轮换同步**是最大的运维陷阱。
+
+```
+Fernet Key 目录结构（每个控制节点必须完全一致）：
+/etc/keystone/fernet-keys/
+  0    ← 当前加密 key（Primary）
+  1    ← 上一轮密钥（Staged，用于解密旧 token）
+  ...  ← 历史密钥（rotation 保留数量由 max_active_keys 决定）
+
+轮换流程：
+  keystone-manage fernet_rotate  → 在一个节点执行
+  ansible / cron / Vault         → 同步到所有控制节点
+  ⚠ 未同步前，该节点签发的 Token 在其他节点无法验证 → 401
 ```
 
-Cinder 备份的控制逻辑在 `cinder-backup`，但备份性能和可恢复性高度依赖底层后端能力。面试时一定区分“控制面备份对象”和“真实数据所在故障域”。
+> **Q: 为什么多控制节点会出现偶发 401？**  
+> A: 最大概率是 Fernet key 未同步。某节点 rotate 后发出的 Token，其他节点因缺少新 Primary key 而验证失败。
+>
+> **Q: Keystone 挂了会怎样？**  
+> A: 正在运行的 VM 不受影响（数据面不依赖 Keystone），但所有新 API 调用、token 续期、服务间认证均会失败，nova/neutron/cinder 之间的 service account 调用也会中断。
+>
+> **Q: application credential 和 service user 的区别？**  
+> A: application credential 绑定到特定项目和角色，不随用户密码变更失效，适合自动化场景；service user 是服务组件自己的身份账号，通常权限更宽。
 
-你可以这样讲原理：
+---
 
-1. 对卷做备份时，Cinder 会读取卷或快照的数据块。
-2. `cinder-backup` 把数据按 chunk 处理，可做压缩和增量。
-3. 数据被写入备份后端，例如 Swift、Ceph、NFS、Posix 等。
-4. 数据库里会记录备份链和元数据。
-5. 恢复时再从备份后端读回，写到新卷或目标卷。
+### 3.2 Nova — 计算控制面本质是分布式状态机
 
-面试官可能追问的细节：
+Nova 不是 Hypervisor，它是**计算资源的编排和调度控制面**，通过驱动框架对接 libvirt/Hyper-V/VMware 等底层。
 
-1. 增量备份的基础是什么。
-   本质是“和前一次备份相比，哪些块变了”，不同后端能力差异很大。
-2. 为什么备份很慢。
-   因为它不是单纯元数据复制，而是真实块数据扫描、压缩、网络传输、后端写入。
-3. 为什么恢复会吃很多内存和 CPU。
-   因为 chunk 解压、缓冲和写回都占资源，并发恢复时会明显放大。
+#### 核心进程职责
 
-### 5.4 控制面恢复顺序
+| 进程 | 职责 | 故障影响 |
+|------|------|----------|
+| nova-api | 接受外部请求，参数校验，写入 DB 初始状态 | API 不可用，无法新建/删除实例 |
+| nova-scheduler | 从 Placement 获取候选 Host，执行 Filter/Weigh 算法 | 调度停止，积压请求，已运行 VM 不受影响 |
+| nova-conductor | 控制面编排中枢，代替 compute 写 DB，降低数据库暴露面 | 任务编排中断，Conductor 是扩展性关键 |
+| nova-compute | 与 libvirt 交互，管理本地虚机生命周期 | 该宿主机实例操作失败，疏散触发 |
+| placement-api | 资源库存（inventory）、特性（traits）、分配（allocations） | 视图错误 → 调度失败，是 `No valid host` 首查对象 |
 
-如果整个控制面故障，恢复顺序最好按依赖来：
+#### Cells v2 架构 — 大规模扩展的关键
 
-1. 基础系统：DNS、NTP、VIP、证书、操作系统、容器运行时。
-2. 数据层：MariaDB / Galera、RabbitMQ、Memcached。
-3. 身份层：Keystone 配置和 Fernet keys。
-4. 核心 API：Nova、Neutron、Cinder、Glance、Placement。
-5. 网络控制：OVN NB/SB 或 Neutron agents。
-6. 再接入 compute、storage、LB、编排等外围服务。
+单 Cell 部署在几百节点后，RabbitMQ 和 MariaDB 会成为瓶颈。Cells v2 通过分片解决规模问题：
 
-这里最容易忽视的点：
+```
+Nova Cells v2 逻辑结构：
 
-1. `fernet-keys` 丢了，旧 token 全部失效，服务之间也可能互相认证失败。
-2. 数据库恢复了但 MQ definitions 没恢复，服务看起来在线，任务却发不出去。
-3. 只恢复 OpenStack 数据库，不恢复 Ceph 或 SAN 元数据，卷记录存在但数据不可读。
+  API Cell（全局）
+  ├── nova-api          ← 统一入口，维护全局 project/quota
+  ├── nova-scheduler    ← 跨 cell 调度
+  ├── nova-conductor    ← 全局编排
+  └── cell0             ← 专门存调度失败实例（ERROR/DELETED）
 
-### 5.5 面试标准答法：如何做 OpenStack 容灾
+  Cell 1                Cell 2                Cell N
+  ├── 独立 RabbitMQ     ├── 独立 RabbitMQ     ├── ...
+  ├── 独立 MariaDB      ├── 独立 MariaDB      ├── ...
+  └── N 个 compute      └── N 个 compute      └── ...
 
-推荐答法：
+  关键：每个 Cell 的消息和数据库边界相互隔离，故障不跨 Cell 扩散
+```
 
-> OpenStack 容灾至少分三层。第一层是控制面 HA，解决单点故障；第二层是控制面备份恢复，解决误删、集群损坏和大面积故障；第三层是租户数据容灾，通常依赖 Cinder 后端复制、Ceph 跨站点、应用层主从或数据库同步。OpenStack 本身只解决一部分，真正的 RPO/RTO 要结合后端存储和业务架构一起设计。
+> **Cells v2 面试要点**
+> - `cell0` 的意义：调度失败的实例不进任何真实 cell，进 cell0，方便统一查询失败记录
+> - 跨 cell 实例列表：`nova list` 会跨所有 cell 聚合，需要 nova-conductor 的 superconductor 模式
+> - 升级注意：`nova-manage cell_v2` 系列命令，错误操作会导致 compute 节点从调度视图消失
+> - 扩展上限：单 cell 建议不超过 500–1000 个 compute 节点（取决于 RabbitMQ 和 DB 规格）
 
-## 6. 网络原理，面试最爱挖的坑
+---
 
-### 6.1 四张网络最好一开始就分好
+### 3.3 Neutron — 网络虚拟化控制面
 
-生产私有云里，最少建议清楚分离这几类网络：
+Neutron 管的是**「网络意图」**，不直接等于「交换机配置」。它通过插件体系把抽象模型（Network/Subnet/Port/Router/FIP）落到具体数据面实现。
 
-1. 管理网络：
-   API、SSH、数据库、消息队列、控制面服务之间通信。
-2. 租户 overlay 网络：
-   VXLAN 或 GENEVE 封装的东西向虚拟网络流量。
-3. 存储网络：
-   Ceph、iSCSI、NFS、FC 管理和数据访问。
-4. 外部或 provider 网络：
-   浮动 IP、SNAT、对外服务出口。
-5. 可选 OOB 网络：
-   BMC、IPMI、交换机管理口。
+#### ML2 插件体系
 
-为什么一定要分：
+```
+Neutron Server
+  │
+  ├── Core Plugin: ML2 (Modular Layer 2)
+  │     ├── Type Driver: flat / vlan / vxlan / gre / geneve
+  │     └── Mechanism Driver:
+  │           ├── openvswitch  → OVS agent 模式（经典）
+  │           ├── ovn          → OVN 模式（新建云主流）
+  │           ├── linuxbridge  → 轻量级，不支持 VXLAN offload
+  │           └── sriovnicswitch → SR-IOV 直通
+  │
+  └── Service Plugin:
+        ├── L3 Router (namespace / DVR / OVN L3)
+        ├── DHCP Agent
+        ├── Metadata Agent
+        ├── LBaaS (Octavia)
+        └── FWaaS / VPNaaS
+```
 
-1. 避免控制面和大流量数据面互相打爆。
-2. 便于做 ACL、QoS 和故障隔离。
-3. MTU、路由和安全策略可以分层治理。
+#### OVS 模式 vs OVN 模式
 
-### 6.2 Provider network 和 self-service network 的区别
+| 维度 | ML2 + OVS（传统） | ML2 + OVN（现代） |
+|------|-------------------|-------------------|
+| 架构 | 每节点 OVS agent + neutron-server 下发 | OVN NB DB → OVN SB DB → ovn-controller |
+| 二层 | br-int / br-tun / br-ex bridge 链 | Logical Switch，ovn-controller 本地计算流表 |
+| 三层 | router namespace（集中）/ DVR（分布式） | OVN L3 原生分布式，无需 router namespace |
+| 安全组 | iptables / nftables（每端口规则） | OVN ACL，下沉到 OVS 流表，性能更好 |
+| DHCP | DHCP namespace + dnsmasq | OVN 内置 DHCP，无 DHCP agent |
+| 排障 | 直观，namespace / bridge 可见 | 需要 ovn-nbctl / ovn-sbctl 工具链 |
+| 规模 | agent 多，控制面复杂 | 控制面更简洁，适合大规模 |
 
-| 方案 | 原理 | 优点 | 缺点 | 适用场景 |
-| --- | --- | --- | --- | --- |
-| Provider Network | 虚机直接桥接到物理 VLAN / flat 网络 | 简单、性能好、调试直观 | 租户自治弱、网络灵活性差 | 传统企业网络、少租户、固定规划 |
-| Self-service Network | 用 VXLAN / GENEVE 等 overlay 构建租户网络，再经路由器到外网 | 多租户隔离强、租户可自助建网 | MTU、排障和控制面更复杂 | 标准私有云、多租户云平台 |
+---
 
-一条记忆线：
+### 3.4 Cinder — 块存储编排层
 
-> Provider 更像“把虚机接到现网”；Self-service 更像“先在云里造一张逻辑网，再决定怎么出云”。
+**关键认知**：Cinder 不是存储本体，而是存储编排控制面。真实数据在哪、性能如何、HA 如何，取决于后端 driver。
 
-### 6.3 一包流量到底怎么走
+| 进程 | 职责 |
+|------|------|
+| cinder-api | 接受卷/快照/备份 CRUD 请求，参数校验，写入 DB |
+| cinder-scheduler | 根据容量、能力、QoS 策略选择后端 storage pool |
+| cinder-volume | 驱动 Ceph RBD / FC / iSCSI / NFS / LVM 执行实际操作 |
+| cinder-backup | 将卷/快照数据流式读取后写入备份后端（Swift/Ceph/NFS） |
 
-```text
-东西向 East-West:
+| 能力 | 说明 | 运维注意 |
+|------|------|----------|
+| 卷类型（Volume Type） | 绑定后端 pool 和 QoS 策略，支持不同性能级别 | 不同 type 可对应 Ceph SSD / SATA 不同 pool |
+| 快照（Snapshot） | 基于 CoW 的逻辑一致点，依赖后端能力 | 不能跨后端，不能当独立备份 |
+| 备份（Backup） | 真实数据导出到备份后端，支持增量 | cinder-backup 是瓶颈，需独立资源 |
+| 复制（Replication） | 后端级别跨站同步（Ceph RBD mirroring 等） | RPO 接近 0，成本高，需专线带宽 |
+| Retype / Migrate | 卷跨后端迁移，支持在线/离线 | 需两端后端同时可达，迁移期间 IO 抖动 |
 
-VM A
-  |
-  v
-tap / vNIC / security group
-  |
-  v
-br-int / OVN logical switch
-  |
-  v
-br-tun / VXLAN or GENEVE encapsulation
-  |
-  v
-宿主机 B 解封装
-  |
-  v
-VM B
+---
 
+### 3.5 Placement — 调度的资源真相来源
 
-南北向 North-South:
+Placement 是最容易被轻视但最重要的组件之一。**`No valid host` 问题的根因有 60% 以上在 Placement 视图。**
 
+| 概念 | 说明 |
+|------|------|
+| Resource Provider (RP) | 代表一个可提供资源的实体（compute node、NUMA node、PCI 设备） |
+| Inventory | RP 能提供的资源上限（total）、保留量（reserved）、超配比（allocation_ratio） |
+| Allocation | 已分配给某实例的资源量，nova-compute 在 VM 启动时提交 |
+| Trait | RP 具备的能力标签，如 `HW:CPU_X86_AVX512F`、`STORAGE:REMOTE_BLOCK`、`CUSTOM_*` |
+| Aggregate | RP 的分组，用于将 compute host 和存储/网络资源绑定（调度约束用） |
+
+```bash
+# 调度失败排查路径（No valid host）
+
+# 1. 确认 compute 节点是否已注册 RP
+openstack resource provider list
+
+# 2. 检查 VCPU/MEMORY_MB/DISK_GB 的 total/reserved/allocation_ratio
+openstack resource provider inventory list <rp_uuid>
+
+# 3. 是否有僵尸 allocation 占用资源（VM 删除后残留）
+openstack resource provider allocation list <rp_uuid>
+
+# 4. Flavor extra_specs 要求的 trait 是否存在
+openstack resource provider trait list <rp_uuid>
+
+# 5. 修复不一致的 allocation（慎用，需在维护窗口执行）
+nova-manage placement heal_allocations
+```
+
+---
+
+### 3.6 其他重要组件
+
+| 组件 | 核心功能 | 面试要点 |
+|------|----------|----------|
+| Glance | 镜像元数据管理 + 分发 | 瓶颈在镜像后端吞吐和并发拉取；支持 image conversion（qcow2↔raw） |
+| Heat | 基础设施编排（IaC） | 类比 Terraform 的云原生实现；HOT 模板支持条件、依赖、嵌套栈 |
+| Octavia | LBaaS，通过 Amphora VM 或 provider driver 实现 | Amphora 本身是 VM，其 HA 取决于 active-standby 模式 |
+| Barbican | 密钥、证书、Secret 管理 | 支持 HSM backend；Cinder 卷加密、TLS termination 场景必用 |
+| Ironic | 裸金属即服务（BaaS） | IPMI/Redfish 管理物理机，支持 PXE/iSCSI/direct 部署；与 Nova 集成 |
+| Designate | DNS 即服务（DNSaaS） | 为 FIP / LB VIP 自动创建 DNS 记录；后端可对接 BIND/PowerDNS |
+| Manila | 共享文件系统即服务 | 多 VM 共享访问场景；后端支持 CephFS、NetApp、GlusterFS |
+
+---
+
+## 四、备份原理与容灾架构
+
+### 4.1 概念辨析：快照、备份、复制
+
+这是面试必考题，三个概念的边界必须清晰：
+
+| 能力 | 本质 | 故障域 | RPO | RTO | 典型用途 |
+|------|------|--------|-----|-----|----------|
+| 快照 Snapshot | CoW 逻辑一致点 | 与原卷共享同一存储 | 分钟级（需一致性组） | 分钟级 | 快速回滚、模板制作 |
+| 备份 Backup | 数据导出到独立介质 | 可跨故障域 | 小时级（取决于周期） | 小时级 | 长期保留、灾难恢复 |
+| 复制 Replication | 持续同步到另一位置 | 完全分离 | 秒级（异步）/ 0（同步） | 分钟级 | 容灾、异地切换 |
+
+> **经典面试陷阱**
+>
+> **Q: 卷快照能当备份用吗？**  
+> A: 不能完全等同。快照依赖原存储后端，后端整体故障时快照随之丢失。真正的备份必须把数据导出到独立故障域的介质。快照可以作为备份链路的「起点」（先快照再备份），但不能替代备份。
+>
+> **Q: 备份了 OpenStack 数据库就算完成了吗？**  
+> A: 不是。数据库只是控制面状态（资源元数据），租户卷里的实际数据不在 DB 里。数据库恢复只能让云「知道资源还在」，不代表数据可读。
+
+---
+
+### 4.2 OpenStack 备份四层架构
+
+| 层次 | 备份内容 |
+|------|----------|
+| **第一层：控制面状态** | MariaDB/Galera 全量+增量备份、RabbitMQ definitions export、Keystone Fernet keys、所有服务配置文件（`/etc/nova/` `/etc/neutron/` 等）、TLS 证书、OVN NB/SB DB（`ovn-nbctl backup`） |
+| **第二层：镜像数据** | Glance 镜像文件（通常在 Ceph pool 或 Swift）+ 镜像元数据（DB）；大环境建议对镜像 pool 做 Ceph RBD export 或 S3 同步 |
+| **第三层：卷数据** | Cinder backup（流式导出到 Swift/Ceph/NFS）；高价值卷可叠加 Ceph RBD mirroring 做异地复制；快照作为短期保护层 |
+| **第四层：业务数据** | VM 内应用层数据库（mysqldump / pg_dump）、应用配置、用户上传数据；OpenStack 不管这一层，需应用自己负责 |
+
+---
+
+### 4.3 Cinder 备份原理（深度）
+
+```
+Cinder Backup 数据流：
+
+  运行中的 Volume
+       │
+       ├── (推荐) 先创建 Snapshot → 基于快照备份（避免 IO 不一致）
+       │
+       ▼
+  cinder-backup 进程
+       │
+       ├── 读取卷/快照数据块（按 chunk_size 分片）
+       ├── SHA256 校验（确保数据完整性）
+       ├── 可选 zlib 压缩
+       ├── 可选 AES 加密（结合 Barbican）
+       │
+       ▼
+  备份后端写入
+  ├── Swift  → 对象存储，支持大规模水平扩展
+  ├── Ceph   → 写入独立备份 pool，可跨站复制
+  ├── NFS    → 简单，性能受 NFS 服务器限制
+  └── Posix  → 本地文件系统（不推荐生产）
+       │
+       ▼
+  DB 记录：backup chain + 每个 chunk 的偏移/哈希/元数据
+       │
+       ▼
+  恢复 (Restore)
+  ← 从后端读取 chunks → 解压/解密 → 写入目标卷
+```
+
+| 问题 | 根因 |
+|------|------|
+| 增量备份原理 | 对比前一次备份记录的 chunk 哈希，只传输变化的 chunk。Ceph 后端可利用 RBD diff 精确到 4MB 块；Swift 需全量比对。 |
+| 备份慢的根因 | 需真实读取所有数据块（非元数据操作），受限于：① 源卷 IO 速率 ② 网络带宽 ③ 备份后端写入速率 ④ 压缩 CPU 消耗 |
+| 恢复慢的根因 | chunk 解压、网络传输、目标卷顺序写入三阶段串行；并发恢复时内存和 CPU 压力明显 |
+| 一致性保证 | 对运行中 VM 的卷备份存在 crash-consistent 风险。生产建议：① 通知应用层 quiesce ② 使用 Nova instance-backup ③ 基于 snapshot 备份减少不一致窗口 |
+
+---
+
+### 4.4 控制面灾难恢复顺序
+
+控制面完全故障时，恢复顺序必须遵循依赖关系：
+
+1. **基础设施层**：DNS 解析、NTP 时钟同步、VIP/Keepalived、TLS 证书、操作系统、容器运行时
+2. **数据层**：MariaDB/Galera 恢复并确认 Primary Component（`wsrep_cluster_status`）、RabbitMQ 恢复并导入 definitions、Memcached 清空重启（无需备份，状态可重建）
+3. **身份层**：Keystone 配置文件 + Fernet keys 恢复到所有控制节点并确保一致
+4. **核心 API 层**：按顺序启动 Glance → Placement → Nova-API/Scheduler/Conductor → Neutron → Cinder，每层验证 `openstack * list` 可返回结果
+5. **网络控制层**：OVN NB/SB DB 恢复或 Neutron agents 重启，重新触发 port binding 同步
+6. **计算层**：nova-compute 重新注册到 Placement，验证 `hypervisor list`，确认 VM 状态与实际一致
+7. **外围服务**：Octavia、Heat、Designate 等按业务优先级恢复
+
+> **最容易忽视的陷阱**
+> 1. **Fernet keys 不一致**：所有节点 keys 目录不同步 → 旧 token 全部失效，服务间认证中断
+> 2. **MQ definitions 未恢复**：数据库恢复了但 RabbitMQ vhost/user/policy 丢失 → 任务发不出去，服务看起来在线实则无法通信
+> 3. **Galera 脑裂恢复错误**：误操作 `--wsrep-new-cluster` 在非最新节点 → 丢失部分事务
+> 4. **Placement allocation 不一致**：VM 实际在跑但 allocation 丢失 → 调度视图资源虚高，可能导致超卖
+> 5. **OVN DB 与实际流表不同步**：OVN NB/SB 恢复后需等待 ovn-controller 重新下发，期间网络可能中断
+
+---
+
+## 五、网络原理与故障排查
+
+### 5.1 生产网络分区规划
+
+| 网络类型 | 承载流量 | 建议带宽 | 隔离要求 |
+|----------|----------|----------|----------|
+| 管理网（Management） | API / SSH / 数据库 / MQ / 控制面服务 | 1–10 GbE | ACL 严格限制，仅内部访问 |
+| 租户 Overlay 网（Tenant） | VXLAN/GENEVE 封装的东西向 VM 流量 | 25–100 GbE | 物理或 VLAN 隔离 |
+| 存储网（Storage） | Ceph / iSCSI / NFS 数据和心跳 | 25–100 GbE（独立） | 与 overlay 强制隔离，避免带宽抢占 |
+| 外部/Provider 网（External） | FIP / SNAT / 对外服务出口 | 按业务规划 | 与物理网络边界清晰对接 |
+| OOB 带外网（OOB） | BMC / IPMI / 交换机管理 | 1 GbE | 完全隔离，仅运维访问 |
+
+---
+
+### 5.2 数据包完整路径
+
+#### 东西向流量（同租户跨宿主机）
+
+```
+VM A (Host 1)                              VM B (Host 2)
+   │                                           ▲
+   ▼                                           │
+tap interface                           tap interface
+   │                                           │
+   ▼                                           │
+Security Group (iptables/nftables/OVN ACL)     │
+   │                                           │
+   ▼                                           │
+br-int (OVS)                            br-int (OVS)
+   │                                           │
+   ▼                                           │
+br-tun (OVS)                            br-tun (OVS)
+   │                                           │
+   ▼    VXLAN/GENEVE Encapsulation             │
+物理网卡 ──────── underlay 网络 ──────────► 物理网卡
+                                               │
+                                         解封装/分类
+```
+
+#### 南北向流量（VM 访问外网）
+
+```
 VM
-  |
-  v
-tap / br-int
-  |
-  v
-virtual router / distributed router
-  |
-  +--> metadata / DHCP
-  |
-  +--> SNAT / Floating IP
-  |
-  v
-br-ex or provider network
-  |
-  v
-物理网络 / 外部网络
+  │
+  ▼
+tap → br-int → virtual router（OVS flow / router namespace）
+  │
+  ├── Floating IP: DNAT/SNAT（1:1 映射）
+  │
+  └── SNAT: 多 VM 共享 router external IP 出网
+  │
+  ▼
+br-ex → 物理网卡（provider/external network）
+  │
+  ▼
+物理交换机 → 互联网 / 企业网络
+
+注意：DVR 模式下，SNAT 流量仍经 Network 节点；FIP 流量在 Compute 节点本地处理
 ```
 
-东西向走 overlay，南北向通常经过 router namespace、分布式路由或网关节点，再经 `br-ex` 或 provider 接口出云。排障时先判断问题在 `L2 接入`、`overlay 封装`、`L3/NAT`，还是在 `security group / metadata`。
+---
 
-#### 东西向流量
+### 5.3 MTU — 最隐蔽的网络杀手
 
-1. 虚机包从 tap 进入。
-2. 经过安全组规则、端口绑定规则。
-3. 在本地主机上被 OVS 或 OVN pipeline 处理。
-4. 如果目标在另一台宿主机，做 VXLAN/GENEVE 封装后发往对端。
-5. 对端解封装，再送到目标虚机。
+MTU 配置错误是私有云网络问题的头号根因，症状是「小包通、大包丢」，极难复现和排查。
 
-#### 南北向流量
+```
+MTU 计算公式（VXLAN）：
+  物理 MTU          = 1500（默认以太网）
+  VXLAN 头开销      = 50 字节（UDP 8B + VXLAN 8B + Outer ETH 14B + Outer IP 20B）
+  VM 内最大 MTU     = 1500 - 50 = 1450
 
-1. 包进入虚拟路由器。
-2. 经过 DNAT/SNAT 或 Floating IP。
-3. 从 provider 网络或外部 bridge 发到物理网络。
-4. 回程如果路由、MTU、conntrack 或安全组有问题，就会出现“能 ping 网关不能上网”这类症状。
+  如果物理交换机支持 Jumbo Frame（9000）：
+  VM 内 MTU 可设到  = 9000 - 50 = 8950
 
-### 6.4 网络最容易翻车的 8 个点
+GENEVE 头开销约 58 字节（含可变选项），建议 VM MTU = 1442，或要求全链路 Jumbo Frame
 
-1. `MTU` 没算 overlay 头开销。
-   结果是小包通、大包丢，最难排。
-2. `bridge_mappings` 或 physnet 对不上。
-   端口绑定能建，实际不出流量。
-3. Tenant 网络和 provider 网络的路由边界没规划。
-4. 外部网络 VLAN trunk 没在交换机放通。
-5. Metadata 代理或 169.254.169.254 路由链路断。
-6. 安全组规则只放了 ingress，忘了 egress 或 stateful conntrack。
-7. 存储网络和 overlay 混跑，Ceph 或 iSCSI 抢占带宽。
-8. 交换机 ECMP、LACP、MLAG、VXLAN offload 和宿主机设置不匹配。
+配置路径：
+  neutron.conf:    global_physnet_mtu
+  ml2_conf.ini:    path_mtu（隧道 MTU）
+  VM 侧:           通过 DHCP option 26 下发给虚机
+```
 
-## 7. 常见报错、故障现象和排查方法
+---
 
-### 7.1 一套通用排障顺序
+### 5.4 网络 8 大翻车点（附验证命令）
 
-先不要上来就看一堆日志，按顺序排：
+| 翻车点 | 根因 | 快速验证 |
+|--------|------|----------|
+| MTU 不一致 | overlay 头未计入，大包丢弃 | `ping -M do -s 1450 <dst>`；`tcpdump` 抓截断包 |
+| bridge_mappings 错误 | physnet 名称控制节点和计算节点不匹配 | `neutron agent-show <agent-id>` 查 configurations |
+| VLAN trunk 未放通 | 物理交换机没有放通 provider VLAN | 交换机 `show interface trunk`；从 VM ping gateway |
+| Metadata 链路断 | 169.254.169.254 路由异常或 metadata-agent down | `ip netns exec <ns> curl http://169.254.169.254` |
+| Security Group 残缺 | 只放了 ingress 忘了 egress，或 conntrack 满 | `openstack security group rule list`；`conntrack -L \| wc -l` |
+| Overlay 隧道不通 | 宿主机防火墙拦截 UDP 4789(VXLAN)/6081(GENEVE) | `nc -u <remote-host> 4789`；`iptables -L -n \| grep 4789` |
+| DVR 路由缺失 | 计算节点未正确下发分布式路由 | `ip netns exec qrouter-* ip route`；`ovn-nbctl lr-route-list` |
+| 外部交换机 ECMP/LACP 不匹配 | bond/LACP 哈希策略导致单向流量 | `ethtool -S <nic>` 查看收发计数；交换机 LAG 配置核对 |
 
-1. 看请求在哪一层失败：
-   API 层、调度层、网络层、存储层、hypervisor 层。
-2. 看资源状态有没有闭环：
-   实例、port、volume、allocation、backup、snapshot 是否状态一致。
-3. 看依赖组件是否健康：
-   Keystone、RabbitMQ、MariaDB、Placement、OVN/OVS、Ceph。
-4. 看宿主机本地实际状态：
-   bridge、namespace、tap、iptables/nft、libvirt domain、块设备映射。
-5. 最后才是看单个服务日志细节。
+---
 
-### 7.2 面试里最常出现的报错矩阵
+## 六、故障排查矩阵
 
-| 现象 / 报错 | 最可能的根因 | 你应该先看什么 |
-| --- | --- | --- |
-| `No valid host was found` | Placement 库存不对、trait 不匹配、聚合或 AZ 约束冲突 | Placement allocations、resource provider、Flavor extra specs |
-| `Exceeded maximum number of retries. Exhausted all hosts available` | 不是单纯调度失败，而是调到主机后在网络、镜像、卷、libvirt 环节连续失败 | `nova-conductor`、`nova-compute`、底层 attach 错误 |
-| `PortBindingFailed` / 端口创建成功但实例起不来 | ML2/OVS/OVN 绑定失败、physnet 错、agent down | Neutron server、agent 状态、bridge 和映射 |
-| 实例创建成功但拿不到 IP | DHCP agent / metadata / 子网配置问题 | DHCP namespace、port 状态、subnet 和 security group |
-| 实例能 ping 内网不能上外网 | SNAT/FIP 链路、路由、MTU 或外部交换机 trunk | router、br-ex、外部网络、NAT 规则 |
-| `AMQP server ... is unreachable` | RabbitMQ 不通、用户权限错、集群异常 | Rabbit 状态、队列、vhost、网络连通性 |
-| `WSREP has not yet prepared node for application use` | Galera 节点不在 Primary 或未同步 | Galera 集群状态、仲裁、磁盘空间、延迟 |
-| 卷卡在 `attaching` / `detaching` | 后端存储未完成映射、nova/cinder 状态不一致 | `cinder-volume`、`nova-compute`、后端 LUN/RBD 状态 |
-| 备份卡在 `creating` / `restoring` | cinder-backup、RabbitMQ、数据库或后端备份介质异常 | `cinder-backup.log`、后端对象存储、任务状态 |
-| token 偶发失效、跨控制节点认证失败 | Keystone Fernet keys 分发不一致 | 各节点 `/etc/keystone/fernet-keys/` 是否一致 |
-| 虚机启动后控制台黑屏 | 镜像驱动、virtio、libvirt XML、CPU 模型不兼容 | `nova-compute`、libvirt、镜像格式 |
-| Live migration 失败 | CPU 特性不兼容、共享存储或 block migration 条件不满足、网络不通 | libvirt 迁移日志、CPU flags、目标宿主机存储与网络 |
+### 6.1 通用排障方法论
 
-### 7.3 典型报错场景怎么讲，最容易拿分
+**原则**：不要上来就翻日志。先确定失败发生在哪一层，再聚焦日志。
 
-#### 场景 1：`No valid host was found`
+1. **确定失败层**：API 层？调度层？网络绑定层？存储层？Hypervisor 层？
+2. **检查资源状态闭环**：实例、Port、Volume、Allocation、Backup 状态是否内部一致？有无孤儿资源？
+3. **验证依赖组件健康**：Keystone → RabbitMQ → MariaDB → Placement → OVN/OVS → Ceph，按依赖顺序检查
+4. **验证宿主机本地状态**：bridge/namespace/tap/iptables/libvirt domain/块设备映射是否正确
+5. **最后看日志细节**：精确定位到 request-id / instance-id，跨服务日志关联
 
-这类题不要答“资源不够”就结束。
+---
 
-正确展开方式：
+### 6.2 高频故障排查矩阵
 
-1. 先看 Placement 里 compute 是否正常上报 inventory。
-2. 再看 flavor 是否要求特定 trait、NUMA、hugepage、PCI 设备。
-3. 看 host aggregate、AZ、server group affinity/anti-affinity 是否把候选主机排空了。
-4. 看宿主机虽然在线，但 `reserved_host_memory_mb`、allocation ratio、磁盘库存是否过紧。
+| 故障现象 | 首要根因 | 排查路径 | 解决方向 |
+|----------|----------|----------|----------|
+| `No valid host was found` | Placement 视图错误 / trait 不匹配 / aggregate 约束 | `openstack resource provider list/inventory/trait`；nova-scheduler.log filter 拒绝原因 | 修复 inventory 数据；清理僵尸 allocation；检查 Flavor extra_specs |
+| `Exhausted all hosts available` | 调度到主机后在网络/存储/libvirt 环节连续失败 | nova-conductor.log；nova-compute.log；neutron server.log | 逐一检查 PortBinding / volume attach / libvirt 日志 |
+| `PortBindingFailed` / 实例起不来 | ML2 binding 失败、agent down、physnet 名错 | `neutron agent-list`；`ovs-vsctl show`；OVN NB 日志 | 重启 OVS agent；修正 bridge_mappings；检查 OVN controller |
+| 实例建成但无 IP | DHCP agent / metadata 异常；subnet 配置错误 | `ip netns exec qdhcp-* ip a`；dnsmasq 进程；port 状态 | 重启 DHCP agent；检查 subnet dns_nameservers；验证 SG |
+| 内网通、外网不通 | SNAT/FIP 链路断；router external 未关联；MTU | `ip netns exec qrouter-* ip r`；`iptables -t nat -L`；`ping -s 1450` | 检查 FIP association；验证 external network VLAN；MTU 对齐 |
+| 卷卡在 `attaching` | Ceph 降级 / iSCSI session 断 / nova-cinder 状态不一致 | cinder-volume.log；nova-compute.log；`rbd ls` / `iscsiadm -m session` | 强制 reset volume state；清理残留 session；重建 RBD 映射 |
+| 备份卡在 `creating` | cinder-backup 进程、RabbitMQ、备份后端异常 | cinder-backup.log；`swift stat` / `rbd -p backup ls`；MQ 队列积压 | 重启 cinder-backup；清理后端残留对象；reset backup state |
+| 偶发 401 / 跨节点认证失败 | Fernet key 未同步；时钟漂移 > 允许值（默认 5 分钟） | `diff` 各节点 `/etc/keystone/fernet-keys/`；`chronyc tracking` | 同步 fernet-keys；强制对时；重启 Keystone |
+| Live migration 失败 | CPU 特性不兼容；目标机存储/网络不可达；内存超配 | libvirt 迁移日志；`cpu flags` 对比；目标机 placement allocation | 统一 CPU model；检查共享存储挂载；确认 hugepage 预留 |
+| `AMQP server is unreachable` | RabbitMQ 不通、网络分区、磁盘水位触发 flow control | `rabbitmqctl cluster_status`；`df -h /var/lib/rabbitmq`；netstat | 检查 MQ 磁盘空间；重建集群成员；调整 disk_free_limit |
+| `WSREP has not yet prepared node` | Galera 节点不在 Primary Component 或未同步 | `show status like 'wsrep%'`；Galera 日志；磁盘空间 | 按正确顺序执行 bootstrap；检查网络分区；清理磁盘 |
 
-一句话：
+---
 
-> 这是“调度约束和资源视图不匹配”的题，不是“主机宕机”的题。
+### 6.3 关键日志位置
 
-#### 场景 2：网络全都建好了，但虚机不通
+| 服务 | 日志路径 | 重点查什么 |
+|------|----------|------------|
+| nova-api | `/var/log/nova/nova-api.log` | API 请求接入、配额检查、参数校验 |
+| nova-scheduler | `/var/log/nova/nova-scheduler.log` | Filter 拒绝原因，是 `No valid host` 的直接证据 |
+| nova-conductor | `/var/log/nova/nova-conductor.log` | 编排任务异常、跨 cell 路由 |
+| nova-compute | `/var/log/nova/nova-compute.log` | libvirt 调用、attach 操作、迁移 |
+| neutron-server | `/var/log/neutron/server.log` | 端口创建/删除、binding 过程 |
+| cinder-volume | `/var/log/cinder/cinder-volume.log` | 后端驱动操作、attach/detach |
+| cinder-backup | `/var/log/cinder/cinder-backup.log` | 备份/恢复任务进度和错误 |
+| Keystone | `/var/log/httpd/` 或 `journalctl -u openstack-keystone` | token 签发/验证 |
+| libvirt | `journalctl -u libvirtd`；`/var/log/libvirt/qemu/<instance>.log` | 虚机启动/迁移/崩溃 |
+| OVN/OVS | `/var/log/ovn/`；`ovs-vsctl show`；`ovn-nbctl dump-flows` | 流表下发、控制器状态 |
 
-优先级应该是：
+---
 
-1. 端口状态是不是 `ACTIVE`。
-2. 虚机宿主机上 tap 是否接到了正确 bridge。
-3. Overlay 隧道是否通，MTU 是否一致。
-4. 安全组和 port security 是否拦截。
-5. 路由器 namespace、SNAT/FIP 是否正确。
+## 七、私有云建设实战要点
 
-最容易拿分的补充：
+### 7.1 架构设计先于安装
 
-> 先判断是单宿主机还是跨宿主机问题。如果单机通、跨机不通，优先怀疑 overlay 和 MTU；如果内网通、外网不通，优先怀疑路由和 NAT；如果 metadata 不通，优先看 metadata agent 和 namespace 链路。
+最常见的错误是「先装好 OpenStack 再想网络和 HA」。开工前必须回答：
 
-#### 场景 3：多控制节点偶发 401 或服务互相认证失败
+1. **多租户强度**：强多租户（self-service overlay + 配额严格隔离）还是企业单租户（provider network + 简化管理）？
+2. **目标规模**：< 50 节点可简单架构；> 200 节点需规划 cells v2、专用网络节点、独立存储网络；> 1000 节点需考虑多 region 或联邦。
+3. **负载特征**：普通业务 VM / 数据库（NUMA + hugepage）/ GPU 直通（SR-IOV/VFIO）/ NFV（DPDK + huge）/ VDI，各有不同硬件和 flavor 要求。
+4. **HA 目标**：控制面 HA（3 节点 + VIP）+ 数据面容灾（Ceph 跨站复制）+ 业务级 RPO/RTO 是三个独立维度，需分别设计。
+5. **运营团队能力**：OpenStack 不是托管服务，需要团队覆盖网络、存储、Linux、自动化、监控全栈。
 
-高概率是：
+---
 
-1. Keystone endpoint 不一致。
-2. Fernet key 未同步。
-3. 时钟漂移导致 token 校验失败。
-4. Service user 的密码、application credential 或 policy 配置不一致。
+### 7.2 控制面高可用设计
 
-这里面最经典的坑就是：
+3 个控制节点 + VIP 是最低标准，但不是充分条件。
 
-> 某个节点先做了 Fernet rotate，但新 key 没有立刻分发，导致这个节点发出的 token 其他节点验不过。
+| 组件 | HA 方案 | 关键配置 | 常见陷阱 |
+|------|---------|----------|----------|
+| API 入口 | HAProxy + Keepalived VIP | health check interval；backend timeout | VIP 飘移时 session 丢失，API 需幂等 |
+| MariaDB/Galera | 3 节点同步复制 | wsrep_cluster_size=3；gcache 大小 | 脑裂恢复错误；磁盘满触发 SST；时钟漂移 |
+| RabbitMQ | 3 节点 Quorum Queue | disk_free_limit；net_ticktime；ha-mode all | 消息积压触发 flow control；磁盘水位；网络分区 |
+| Keystone | 多节点无状态（Fernet） | fernet key 同步机制；token expiry | key 不同步导致偶发 401 |
+| OVN NB/SB DB | Raft 3 节点 | ovn-northd HA；ovn-controller 本地自治 | DB leader 切换期间下发暂停 |
+| Placement | 多节点无状态（读写 DB） | DB 连接池；API 超时 | DB 慢查询会直接导致调度超时 |
 
-### 7.4 关键日志位置要背住
+---
 
-常见位置：
+### 7.3 存储选型决策
 
-1. `/var/log/nova/nova-api.log`
-2. `/var/log/nova/nova-scheduler.log`
-3. `/var/log/nova/nova-conductor.log`
-4. `/var/log/nova/nova-compute.log`
-5. `/var/log/neutron/server.log`
-6. `/var/log/cinder/cinder-volume.log`
-7. `/var/log/cinder/cinder-backup.log`
-8. `/var/log/httpd/` 或 Keystone 服务日志
-9. `journalctl -u libvirtd` 或 `virtqemud`
-10. OVS / OVN 自身日志和数据库状态
+| 方案 | 适用场景 | 优势 | 挑战 | OpenStack 集成 |
+|------|----------|------|------|----------------|
+| Ceph RBD | 大规模统一存储（卷+镜像+对象） | 弹性扩展、深度集成、多租户 QoS | 运维复杂度高；网络要求严格 | Cinder/Glance/Nova 均原生支持，共享 pool 减少镜像拷贝 |
+| FC SAN | 高性能数据库、低时延场景 | 极低时延、协议成熟 | 扩展性差、成本高、需 FC 交换机 | Cinder FC driver；需 FC HBA 和 zone 配置 |
+| iSCSI | 传统企业环境迁移、中等规模 | 成本低、IP 网络承载 | 性能和可靠性不及 FC；需独立存储网 | Cinder iSCSI driver；LVM 或 NetApp/Pure 等 |
+| NFS | 小规模验证、非关键业务 | 最简单、零额外硬件 | 锁语义复杂；高并发 IO 差；单点风险 | Cinder NFS driver；Glance NFS store |
 
-面试时不要报一堆路径，点到为止即可：
+**结论**：Cinder 负责「编排卷」，后端决定「卷到底好不好用」。评估 OpenStack 存储能力时，必须同时看 Cinder 架构和后端存储架构。
 
-> 控制面看 API、scheduler、conductor；数据面看 compute、libvirt、OVS/OVN、后端存储。
+---
+
+### 7.4 硬件基础规范
 
-## 8. 私有云搭建过程中，最该注意什么
+| 项目 | 要求 |
+|------|------|
+| CPU 虚拟化 | 所有宿主机统一开启 VT-x/AMD-V；CPU 型号差异影响 live migration，建议同代同型号或配置 CPU baseline 模式 |
+| NUMA 规划 | 高性能 VM（数据库/NFV）需 NUMA 亲和性，涉及 Nova flavor extra_specs、BIOS NUMA 拓扑、Placement NUMA trait |
+| SR-IOV / DPDK | NFV 场景需从网卡、BIOS、内核参数（hugepage、isolcpu）、OVS-DPDK、Nova PCI passthrough 全链路规划 |
+| 时钟同步 | NTP 漂移 > 5 分钟会导致 Keystone token 失效、Galera 对时钟敏感；建议 Chrony + 内部 NTP，监控 offset |
+| 磁盘 IO | 控制节点 DB 和 MQ 必须使用 SSD；Ceph OSD 节点分开数据盘和日志盘；避免控制面和数据面共用磁盘 |
+| 网卡绑定 | 控制面建议 active-backup bond；数据面建议 LACP bond 或多队列网卡；注意与交换机 LACP/ECMP 策略对齐 |
 
-### 8.1 先做架构设计，不要先装服务
+---
 
-开工前必须回答这些问题：
+### 7.5 自动化部署与 Day-2 运营
 
-1. 多租户强不强。
-   决定你是偏 provider network 还是 self-service overlay。
-2. 规模多大。
-   决定是否一开始就规划 `cells v2`、分区机房、专用网络节点、独立存储网络。
-3. 负载是什么。
-   普通业务 VM、数据库、GPU、NFV、VDI，对 CPU、NUMA、SR-IOV、存储模型要求都不同。
-4. HA 目标和 RPO/RTO 是多少。
-   决定是只做控制面 HA，还是要跨站复制和业务级容灾。
+**核心观点**：自动化运营的投入比 Day-0 安装更重要。一个「部署简单但无法自动恢复」的云，在生产中风险极高。
 
-### 8.2 网络是成败第一位
+| 运营能力 | 建设要求 | 工具参考 |
+|----------|----------|----------|
+| 配置即代码 | 所有配置纳入版本控制，环境可重复 | Ansible / Kolla-Ansible / TripleO / Helm |
+| 密钥/证书管理 | Fernet keys、TLS 证书、服务密码统一分发和轮换 | Vault / Ansible Vault / cert-manager |
+| 标准化变更流程 | 升级、扩容、节点替换有 Runbook 和回滚方案 | GitOps + CI/CD Pipeline |
+| 监控告警 | 控制面进程、MQ 队列、DB 延迟、Ceph 健康、VM 密度 | Prometheus + Grafana + Alertmanager |
+| 日志聚合 | 跨节点日志统一查询，支持 request-id 关联 | ELK / Loki + Grafana |
+| 容量规划 | vCPU/内存/存储使用率趋势，提前扩容 | Gnocchi / InfluxDB / Prometheus 自定义指标 |
+| 备份恢复演练 | 定期执行 DB 恢复、卷恢复、控制面重建演练 | 季度演练计划 + 演练报告归档 |
 
-最重要的不是把 Neutron 装起来，而是先把网络模型想清楚：
+---
 
-1. 管理网、存储网、overlay 网、外部网是否物理或逻辑隔离。
-2. MTU 是否端到端一致。
-3. 物理交换机 trunk、VLAN、ECMP、LACP 策略是否和云侧一致。
-4. 外部网络、浮动 IP、SNAT 的地址池是否够用。
-5. 是否需要 BGP、DVR、分布式网关、SR-IOV、DPDK。
+## 八、高频追问与标准答法
 
-一句实战经验：
+### Q1：为什么 OpenStack 被认为「很复杂」
 
-> 私有云里 70% 的“OpenStack 问题”，最后根因其实是网络边界、MTU、交换机 trunk 或错误的物理拓扑假设。
+> OpenStack 的复杂性来自三个维度叠加：
+> - **分布式系统复杂性**：多个有状态服务通过消息总线和数据库协作，网络分区、时钟漂移、消息丢失都会引发级联问题。
+> - **可插拔性复杂性**：hypervisor / 网络机制 / 存储后端的排列组合庞大，每种组合都有独立的调优和排障路径。
+> - **多租户隔离复杂性**：在同一物理基础设施上实现强安全隔离、独立网络、独立配额，要求各层协同。
+>
+> 三者叠加后，单个 API 调用可能触发十几个服务的联动，任何一环的异常都可能导致整体不可预期的行为。
 
-### 8.3 控制面高可用不是“堆三台控制节点”就完了
+---
 
-控制面 HA 至少要考虑：
+### Q2：Nova、Neutron、Cinder 三者关系
 
-1. API VIP 和反向代理。
-2. MariaDB / Galera 仲裁、时钟同步、磁盘延迟。
-3. RabbitMQ 镜像队列、网络分区、磁盘水位。
-4. Keystone Fernet key 分发机制。
-5. OVN NB/SB DB 或其他网络控制数据库高可用。
-6. 滚动升级时的兼容矩阵。
+> Nova 是计算编排核心，负责实例生命周期和调度决策，是另外两者的「调用方」。Neutron 负责网络意图（Port/Router/SG/FIP）的建模和下发，与 Nova 的交互点在 port binding（绑定 vNIC 到 compute host）。Cinder 负责块存储卷的生命周期和后端编排，与 Nova 的交互点在 volume attach/detach。
+>
+> **三者共同点**：都不直接处理数据面流量，而是通过控制命令驱动各自的数据面（libvirt/OVS/Ceph）完成真实工作。
 
-常见误区：
+---
 
-1. 控制节点数量够，但没有稳定 VIP 和健康检查。
-2. 所有组件都堆在同一组磁盘上，I/O 抖动会把数据库和 MQ 一起拖慢。
-3. 只做服务级 HA，不做配置、证书、密钥和数据库备份。
+### Q3：OpenStack 最关键的外部依赖
 
-### 8.4 存储选型直接决定云的“性格”
+| 依赖 | 为什么关键 |
+|------|------------|
+| MariaDB/Galera | 所有控制面状态的持久化存储，主库故障 = 控制面完全停止 |
+| RabbitMQ | 异步任务总线，nova/neutron/cinder RPC 依赖，积压或分区会导致任务挂起 |
+| Keystone Fernet Keys | 多节点不同步 = 跨节点认证失败；丢失 = 所有 token 失效 |
+| 底层网络 | MTU、VLAN trunk、物理拓扑错误会导致 overlay 完全不通，排查极难 |
+| 存储后端 | Ceph 健康状态直接决定卷和镜像的可用性；Ceph 降级会导致 IO hang |
+| NTP 时钟 | 漂移影响 token 校验、Galera 同步、RabbitMQ 心跳，是被低估的隐患 |
 
-`Ceph RBD`
+---
 
-1. 适合大规模、统一块存储、镜像和卷场景。
-2. 和 OpenStack 结合紧密，但运维复杂度高。
+### Q4：私有云上线前必须完成的演练
 
-`LVM + iSCSI`
+1. **控制节点单点失败切换**：关闭一个控制节点，验证 VIP 漂移、API 可用性、RabbitMQ/Galera 自动选主
+2. **RabbitMQ 集群故障恢复**：模拟一个 MQ 节点宕机，验证消息不丢失、任务继续执行
+3. **MariaDB 恢复演练**：从备份完整重建 DB 并验证所有服务可读写，包括 Schema 版本验证
+4. **Keystone Fernet Key 轮换**：执行 rotate 并同步所有节点，验证业务无中断
+5. **网络回归测试**：MTU 验证（`ping -M do -s 1450`）；FIP 和 SNAT 验证；跨宿主机东西向验证
+6. **Cinder 卷完整恢复**：从备份还原卷，挂载到新 VM，验证数据完整性（`md5sum`）
+7. **大规模并发创建压测**：并发创建 50–200 个实例，验证调度器、MQ、DB 在压力下的稳定性
+8. **存储故障模拟**：模拟 Ceph OSD 宕机，验证 IO 降级但不中断；模拟 OSD 磁盘满，验证告警和限速
 
-1. 结构简单，适合小规模验证或传统 SAN。
-2. 扩展性和多租户能力一般。
+---
 
-`NFS`
+## 九、快速记忆卡片
 
-1. 简单，但性能和锁语义要看后端。
-2. 对高并发数据库工作负载通常不是最佳选择。
+### 核心依赖链
 
-一句面试结论：
+```
+NTP 时钟同步
+  ↓
+MariaDB/Galera（所有控制面状态持久化）
+  ↓
+RabbitMQ（服务间异步 RPC）
+  ↓
+Keystone（Fernet keys 同步）→ 认证授权基础
+  ↓
+Placement → 资源视图（调度基础）
+  ↓
+Nova-API / Nova-Scheduler / Nova-Conductor
+  ↓
+Neutron-Server + OVN/OVS → 网络控制下发
+  ↓
+Cinder-Volume + Ceph/SAN → 存储编排
+  ↓
+nova-compute + libvirt → 实际启动虚机
+```
 
-> Cinder 负责“编排卷”，后端决定“卷到底好不好用”。所以评估 OpenStack 存储能力时，必须同时看 Cinder 架构和后端存储架构。
+---
 
-### 8.5 硬件和虚拟化基础别踩雷
+### `No valid host` 速查
 
-1. CPU 虚拟化扩展必须统一开启。
-2. BIOS、microcode、CPU 型号差异会影响 live migration。
-3. NUMA、hugepage、SR-IOV 需要从宿主机、Flavor、Placement、Neutron 一起规划。
-4. 磁盘控制器、RAID、缓存策略会直接影响控制面数据库和后端存储。
-5. 时钟同步必须稳定，NTP 漂移会引发 token、数据库、集群仲裁一串连锁问题。
+```bash
+# 1. RP 是否注册
+openstack resource provider list
 
-### 8.6 自动化部署和 Day-2 运维比 Day-0 更重要
+# 2. VCPU/MEM/DISK 余量
+openstack resource provider inventory list <rp_uuid>
 
-生产环境至少要做到：
+# 3. 有无僵尸 allocation
+openstack resource provider allocation list <rp_uuid>
 
-1. 基础配置代码化。
-2. Fernet key、证书、密码、service account 有统一分发机制。
-3. 升级、扩容、替换节点、数据库备份恢复有标准流程。
-4. 日志、监控、告警和容量规划接入平台。
-5. 定期做恢复演练，不要让备份只停留在“看起来存在”。
+# 4. Flavor 要求的 trait 是否存在
+openstack resource provider trait list <rp_uuid>
 
-## 9. 高频面试追问，标准答法
+# 5. Filter 被哪个过滤器拒绝
+grep "No valid host" /var/log/nova/nova-scheduler.log
 
-### 9.1 为什么 OpenStack 容易被说“复杂”
+# 6. AZ/aggregate 约束
+openstack aggregate list
+openstack aggregate show <aggregate>
+```
 
-答：
+---
 
-> 因为它不是一个单体平台，而是一组强解耦、强可插拔、强依赖的分布式系统。每个组件单独看都能理解，但一旦进入实例创建、网络转发、卷挂载、认证授权和 HA 协同，复杂度会呈乘法增长。
+### 备份检查清单
 
-### 9.2 为什么说 OpenStack 更适合“有平台工程能力”的团队
+- [ ] **控制面**：DB 每日全量 + 增量；MQ definitions；Fernet keys；所有 `/etc/*` 配置目录；TLS 证书
+- [ ] **镜像**：Glance 镜像 pool 异地同步或 Ceph RBD export
+- [ ] **数据卷**：Cinder backup 到独立后端（非同一 Ceph 集群）+ Ceph RBD mirroring（高价值卷）
+- [ ] **业务层**：应用数据库备份 + 应用配置 + 用户数据
+- [ ] **验证**：至少每季度执行一次完整恢复演练，记录 RTO/RPO 实测值
 
-答：
+---
 
-> 因为 OpenStack 提供的是基础能力和抽象，不是一个全托管产品。你需要自己做网络设计、版本治理、部署自动化、监控、备份、故障演练和团队协作机制。
+### 面试收尾话术
 
-### 9.3 Nova、Neutron、Cinder 三者的关系是什么
-
-答：
-
-> Nova 负责实例生命周期和调度，是主编排者；Neutron 负责端口、IP、路由和安全策略；Cinder 负责卷生命周期和存储后端编排。创建实例时，Nova 会分别调用 Neutron 和 Cinder，但网络流量和块数据并不通过 Nova 转发。
-
-### 9.4 OpenStack 最关键的外部依赖是什么
-
-答：
-
-> 一般是数据库、消息队列、Keystone key 管理、底层网络和后端存储。OpenStack 很多故障看起来发生在 API，实际根因常在这几类依赖上。
-
-### 9.5 私有云上线前必须做哪几项演练
-
-答：
-
-1. 控制节点单点故障切换。
-2. RabbitMQ / MariaDB 故障恢复。
-3. Keystone key 轮换和恢复。
-4. 交换机 trunk / MTU / 外网链路回归验证。
-5. Cinder 卷恢复和业务数据恢复。
-6. 大规模并发创建实例压测。
-
-## 10. 最后 1 分钟总结
-
-你可以这样做收尾：
-
-> OpenStack 的核心不是记住多少项目名，而是理解它如何把认证、调度、网络、块存储、镜像和多租户隔离组合成一个可运维的 IaaS 平台。架构上要抓住控制面和数据面分离，备份上要抓住控制面状态和租户数据是两条线，排障上要抓住状态、依赖和流量路径，私有云建设上则一定先做网络和故障域设计，再谈安装和功能。
-
-如果面试官继续追问，你再补一句：
-
-> 真正成熟的 OpenStack 方案，不是“服务都启动成功”，而是“故障来了以后，能定位、能切换、能恢复、能扩容”。
+> OpenStack 的核心不是组件数量多，而是它把认证、调度、网络虚拟化、块存储编排和多租户隔离组合成一个可运维的 IaaS 平台。
+>
+> **架构层面**：抓住控制面和数据面分离，抓住状态持久化（DB）、异步解耦（MQ）和资源视图（Placement）三个支柱。
+>
+> **备份层面**：控制面状态和租户数据是两条独立的备份线，缺任何一条都不完整。
+>
+> **排障层面**：先确定失败层，再检查状态闭环，再看依赖组件，最后看日志。
+>
+> **私有云建设**：先做网络和故障域设计，再做安装；先做 HA 和备份演练，再上线业务。
+>
+> 真正成熟的 OpenStack 方案，标准不是「服务都启动了」，而是「故障来了能定位、能切换、能恢复、能在不重建环境的情况下扩容」。
