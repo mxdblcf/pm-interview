@@ -10,24 +10,12 @@ order: 1
 > 阅读建议：先背 `1. 一句话打穿`、`5. 备份原理`、`7. 常见报错`、`8. 私有云搭建注意事项`，再看细节。  
 > 方法论：不要把 OpenStack 当成“装一堆服务”。它本质上是一个把计算、网络、存储、身份、调度、配额、多租户和高可用编排在一起的 IaaS 控制面。
 
-<div class="interview-grid">
-  <div class="interview-card">
-    <strong>一句话定位</strong>
-    <p>OpenStack 不是单体软件，而是一组通过 API、消息总线、数据库和驱动框架拼起来的云操作系统。</p>
-  </div>
-  <div class="interview-card">
-    <strong>核心矛盾</strong>
-    <p>面试真正要听的不是组件名，而是你能不能说清“状态在谁手里、流量走哪条路径、故障怎么收敛”。</p>
-  </div>
-  <div class="interview-card">
-    <strong>最容易挂的地方</strong>
-    <p>不是单个 API，而是 RabbitMQ、MariaDB、Keystone Fernet key、Neutron MTU、Placement 资源视图和底层存储一致性。</p>
-  </div>
-  <div class="interview-card">
-    <strong>私有云成败关键</strong>
-    <p>前期网络规划、故障域设计、自动化部署、备份恢复演练，比“把服务跑起来”重要得多。</p>
-  </div>
-</div>
+先抓住 4 个总纲：
+
+- 一句话定位：OpenStack 不是单体软件，而是一组通过 API、消息总线、数据库和驱动框架拼起来的云操作系统。
+- 核心矛盾：面试真正要听的不是组件名，而是你能不能说清“状态在谁手里、流量走哪条路径、故障怎么收敛”。
+- 最容易挂的地方：不是单个 API，而是 RabbitMQ、MariaDB、Keystone Fernet key、Neutron MTU、Placement 资源视图和底层存储一致性。
+- 私有云成败关键：前期网络规划、故障域设计、自动化部署、备份恢复演练，比“把服务跑起来”重要得多。
 
 ## 1. 一句话打穿
 
@@ -58,110 +46,28 @@ order: 1
 
 ### 3.1 总体架构图
 
-<div class="diagram-card">
-  <svg viewBox="0 0 1220 700" role="img" aria-labelledby="arch-title arch-desc">
-    <title id="arch-title">OpenStack 核心架构总览</title>
-    <desc id="arch-desc">展示用户入口、控制平面、调度与状态、计算节点、网络节点和存储后端之间的关系。</desc>
-    <defs>
-      <linearGradient id="panelA" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#fff8ef" />
-        <stop offset="100%" stop-color="#fdeef3" />
-      </linearGradient>
-      <linearGradient id="panelB" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#eef7ff" />
-        <stop offset="100%" stop-color="#eef4ff" />
-      </linearGradient>
-      <linearGradient id="panelC" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stop-color="#edfbf7" />
-        <stop offset="100%" stop-color="#eef8f0" />
-      </linearGradient>
-      <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c6adb"></path>
-      </marker>
-    </defs>
+```text
++----------------------------------------------------------------------------------+
+| 用户入口                                                                         |
+| User / CLI / SDK / Terraform -> HAProxy / Keepalived / VIP -> Horizon / API     |
++----------------------------------------------------------------------------------+
+                                         |
+                                         v
++----------------------------------------------------------------------------------+
+| 控制平面 Control Plane                                                           |
+| Keystone | Nova API | Neutron | Cinder / Glance | Placement | Octavia | Heat    |
+| RabbitMQ | MariaDB / Galera | Memcached | Nova Cells v2                         |
++----------------------------------------------------------------------------------+
+          |                                 |                                 |
+          v                                 v                                 v
++---------------------------+  +--------------------------------+  +----------------------------+
+| Compute Node              |  | Network Path                   |  | Storage Backend            |
+| nova-compute              |  | OVS / OVN / VXLAN / GENEVE     |  | Ceph RBD / FC / iSCSI     |
+| libvirt / qemu-kvm        |  | security group / FIP / NAT     |  | NFS / LVM / Swift         |
++---------------------------+  +--------------------------------+  +----------------------------+
+```
 
-    <rect x="20" y="20" width="1180" height="660" rx="28" fill="#fffdf9" stroke="#e6ddcf" stroke-width="2"></rect>
-
-    <rect x="50" y="50" width="1120" height="110" rx="24" fill="url(#panelA)" stroke="#e6c3d2" stroke-width="2"></rect>
-    <rect x="80" y="82" width="220" height="48" rx="18" fill="#ffffff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="190" y="112" text-anchor="middle" font-size="24" font-weight="700" fill="#8f2f5d">用户 / CLI / SDK / Terraform</text>
-    <rect x="360" y="82" width="260" height="48" rx="18" fill="#ffffff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="490" y="112" text-anchor="middle" font-size="24" font-weight="700" fill="#5640b1">HAProxy / Keepalived / VIP</text>
-    <rect x="690" y="82" width="440" height="48" rx="18" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="910" y="112" text-anchor="middle" font-size="24" font-weight="700" fill="#2d6f8d">Horizon / OpenStack API Endpoints</text>
-
-    <rect x="50" y="190" width="1120" height="220" rx="24" fill="url(#panelB)" stroke="#b8cfee" stroke-width="2"></rect>
-    <text x="88" y="228" font-size="28" font-weight="800" fill="#345a9d">控制平面 Control Plane</text>
-
-    <rect x="82" y="250" width="170" height="62" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="167" y="286" text-anchor="middle" font-size="23" font-weight="700" fill="#5c48bd">Keystone</text>
-    <text x="167" y="307" text-anchor="middle" font-size="15" fill="#6c6791">认证 / Token / Catalog</text>
-
-    <rect x="278" y="250" width="170" height="62" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="363" y="286" text-anchor="middle" font-size="23" font-weight="700" fill="#5c48bd">Nova API</text>
-    <text x="363" y="307" text-anchor="middle" font-size="15" fill="#6c6791">实例生命周期入口</text>
-
-    <rect x="474" y="250" width="170" height="62" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="559" y="286" text-anchor="middle" font-size="23" font-weight="700" fill="#5c48bd">Neutron</text>
-    <text x="559" y="307" text-anchor="middle" font-size="15" fill="#6c6791">网络模型 / IPAM / Port</text>
-
-    <rect x="670" y="250" width="170" height="62" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="755" y="286" text-anchor="middle" font-size="23" font-weight="700" fill="#5c48bd">Cinder / Glance</text>
-    <text x="755" y="307" text-anchor="middle" font-size="15" fill="#6c6791">卷 / 镜像 / 快照</text>
-
-    <rect x="866" y="250" width="240" height="62" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="986" y="286" text-anchor="middle" font-size="23" font-weight="700" fill="#5c48bd">Placement / Octavia / Heat</text>
-    <text x="986" y="307" text-anchor="middle" font-size="15" fill="#6c6791">资源视图 / LB / 编排</text>
-
-    <rect x="130" y="335" width="180" height="52" rx="16" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="220" y="367" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">RabbitMQ</text>
-    <text x="220" y="385" text-anchor="middle" font-size="14" fill="#5c7089">异步任务总线</text>
-
-    <rect x="350" y="335" width="220" height="52" rx="16" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="460" y="367" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">MariaDB / Galera</text>
-    <text x="460" y="385" text-anchor="middle" font-size="14" fill="#5c7089">状态、配额、映射关系</text>
-
-    <rect x="610" y="335" width="200" height="52" rx="16" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="710" y="367" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Memcached</text>
-    <text x="710" y="385" text-anchor="middle" font-size="14" fill="#5c7089">Token / 缓存</text>
-
-    <rect x="850" y="335" width="210" height="52" rx="16" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="955" y="367" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Nova Cells v2</text>
-    <text x="955" y="385" text-anchor="middle" font-size="14" fill="#5c7089">cell0 / cell1 / 多 cell</text>
-
-    <rect x="50" y="440" width="1120" height="210" rx="24" fill="url(#panelC)" stroke="#bde2d5" stroke-width="2"></rect>
-    <text x="88" y="478" font-size="28" font-weight="800" fill="#246d59">数据平面 Data Plane</text>
-
-    <rect x="82" y="504" width="300" height="112" rx="18" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="232" y="538" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">Compute Node</text>
-    <text x="232" y="565" text-anchor="middle" font-size="16" fill="#4f766b">nova-compute / libvirt / qemu-kvm</text>
-    <text x="232" y="590" text-anchor="middle" font-size="16" fill="#4f766b">virtio / NUMA / hugepage / SR-IOV</text>
-
-    <rect x="420" y="504" width="330" height="112" rx="18" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="585" y="538" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">Network Path</text>
-    <text x="585" y="565" text-anchor="middle" font-size="16" fill="#4f766b">OVS / OVN / bridge / VXLAN / GENEVE</text>
-    <text x="585" y="590" text-anchor="middle" font-size="16" fill="#4f766b">security group / NAT / floating IP / metadata</text>
-
-    <rect x="788" y="504" width="350" height="112" rx="18" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="963" y="538" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">Storage Backend</text>
-    <text x="963" y="565" text-anchor="middle" font-size="16" fill="#4f766b">Ceph RBD / FC / iSCSI / NFS / LVM / Swift</text>
-    <text x="963" y="590" text-anchor="middle" font-size="16" fill="#4f766b">镜像拉取、卷挂载、快照、备份、复制</text>
-
-    <line x1="300" y1="106" x2="360" y2="106" stroke="#7c6adb" stroke-width="4" marker-end="url(#arrow)"></line>
-    <line x1="620" y1="106" x2="690" y2="106" stroke="#7c6adb" stroke-width="4" marker-end="url(#arrow)"></line>
-
-    <line x1="363" y1="312" x2="220" y2="335" stroke="#7c6adb" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="363" y1="312" x2="460" y2="335" stroke="#7c6adb" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="559" y1="312" x2="220" y2="335" stroke="#7c6adb" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="755" y1="312" x2="460" y2="335" stroke="#7c6adb" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="986" y1="312" x2="955" y2="335" stroke="#7c6adb" stroke-width="3" marker-end="url(#arrow)"></line>
-
-    <line x1="955" y1="387" x2="232" y2="504" stroke="#2aa17d" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="559" y1="387" x2="585" y2="504" stroke="#2aa17d" stroke-width="3" marker-end="url(#arrow)"></line>
-    <line x1="755" y1="387" x2="963" y2="504" stroke="#2aa17d" stroke-width="3" marker-end="url(#arrow)"></line>
-  </svg>
-  <p class="diagram-caption">看这张图时记住两个词：<strong>状态</strong> 和 <strong>流量</strong>。状态主要存在数据库、消息队列、Placement、Keystone key、Neutron/Nova/Cinder 的资源映射里；真实流量则走虚机、虚拟交换机、隧道、存储后端和外部网络。</p>
-</div>
+看这张图时记住两个词：`状态` 和 `流量`。状态主要存在数据库、消息队列、Placement、Keystone key、Neutron/Nova/Cinder 的资源映射里；真实流量则走虚机、虚拟交换机、隧道、存储后端和外部网络。
 
 ### 3.2 控制平面和数据平面为什么一定要分开
 
@@ -187,69 +93,33 @@ order: 1
 
 最常考的不是组件介绍，而是 `boot instance` 全链路。
 
-<div class="diagram-card">
-  <svg viewBox="0 0 1220 420" role="img" aria-labelledby="boot-title boot-desc">
-    <title id="boot-title">OpenStack 创建实例主路径</title>
-    <desc id="boot-desc">从用户发起创建实例请求，到 Nova 调度、Neutron 端口绑定、Cinder 挂卷、Glance 拉镜像，再到 libvirt 拉起虚机。</desc>
-    <defs>
-      <marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#5c48bd"></path>
-      </marker>
-    </defs>
-    <rect x="20" y="20" width="1180" height="380" rx="28" fill="#fffdf8" stroke="#eadfce" stroke-width="2"></rect>
+```text
+Client
+  |
+  v
+Nova API
+  |
+  +--> Keystone       : 认证 / token 校验
+  +--> Placement      : 查询 inventory / traits
+  |
+  v
+Nova Scheduler
+  |
+  v
+Nova Conductor
+  |
+  +--> Neutron        : 创建端口 / 安全组 / binding
+  +--> Glance         : 镜像元数据 / 镜像拉取
+  +--> Cinder         : 卷创建 / 挂载 / boot from volume
+  |
+  v
+nova-compute
+  |
+  +--> libvirt / qemu : 生成 domain XML 并启动虚机
+  +--> Storage        : Ceph / NFS / SAN / LVM
+```
 
-    <rect x="50" y="80" width="130" height="68" rx="18" fill="#fff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="115" y="118" text-anchor="middle" font-size="22" font-weight="700" fill="#913960">Client</text>
-
-    <rect x="220" y="80" width="150" height="68" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="295" y="110" text-anchor="middle" font-size="22" font-weight="700" fill="#5843b7">Nova API</text>
-    <text x="295" y="132" text-anchor="middle" font-size="14" fill="#6f6a95">auth / request</text>
-
-    <rect x="410" y="80" width="150" height="68" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="485" y="110" text-anchor="middle" font-size="22" font-weight="700" fill="#5843b7">Placement</text>
-    <text x="485" y="132" text-anchor="middle" font-size="14" fill="#6f6a95">inventory / traits</text>
-
-    <rect x="600" y="80" width="170" height="68" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="685" y="110" text-anchor="middle" font-size="22" font-weight="700" fill="#5843b7">Nova Scheduler</text>
-    <text x="685" y="132" text-anchor="middle" font-size="14" fill="#6f6a95">select host</text>
-
-    <rect x="810" y="80" width="160" height="68" rx="18" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="890" y="110" text-anchor="middle" font-size="22" font-weight="700" fill="#5843b7">Nova Conductor</text>
-    <text x="890" y="132" text-anchor="middle" font-size="14" fill="#6f6a95">state orchestration</text>
-
-    <rect x="1010" y="80" width="160" height="68" rx="18" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="1090" y="110" text-anchor="middle" font-size="22" font-weight="700" fill="#216f58">nova-compute</text>
-    <text x="1090" y="132" text-anchor="middle" font-size="14" fill="#51786d">libvirt / qemu</text>
-
-    <rect x="320" y="250" width="170" height="64" rx="18" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="405" y="286" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Neutron</text>
-    <text x="405" y="306" text-anchor="middle" font-size="14" fill="#5c7089">port / SG / binding</text>
-
-    <rect x="540" y="250" width="170" height="64" rx="18" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="625" y="286" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Glance</text>
-    <text x="625" y="306" text-anchor="middle" font-size="14" fill="#5c7089">image metadata</text>
-
-    <rect x="760" y="250" width="170" height="64" rx="18" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="845" y="286" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Cinder</text>
-    <text x="845" y="306" text-anchor="middle" font-size="14" fill="#5c7089">boot from volume</text>
-
-    <rect x="980" y="250" width="170" height="64" rx="18" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="1065" y="286" text-anchor="middle" font-size="22" font-weight="700" fill="#2f6f8d">Storage</text>
-    <text x="1065" y="306" text-anchor="middle" font-size="14" fill="#5c7089">Ceph / NFS / SAN</text>
-
-    <line x1="180" y1="114" x2="220" y2="114" stroke="#5c48bd" stroke-width="4" marker-end="url(#arrow2)"></line>
-    <line x1="370" y1="114" x2="410" y2="114" stroke="#5c48bd" stroke-width="4" marker-end="url(#arrow2)"></line>
-    <line x1="560" y1="114" x2="600" y2="114" stroke="#5c48bd" stroke-width="4" marker-end="url(#arrow2)"></line>
-    <line x1="770" y1="114" x2="810" y2="114" stroke="#5c48bd" stroke-width="4" marker-end="url(#arrow2)"></line>
-    <line x1="970" y1="114" x2="1010" y2="114" stroke="#5c48bd" stroke-width="4" marker-end="url(#arrow2)"></line>
-
-    <line x1="885" y1="148" x2="405" y2="250" stroke="#5c48bd" stroke-width="3" marker-end="url(#arrow2)"></line>
-    <line x1="1090" y1="148" x2="625" y2="250" stroke="#5c48bd" stroke-width="3" marker-end="url(#arrow2)"></line>
-    <line x1="1090" y1="148" x2="845" y2="250" stroke="#5c48bd" stroke-width="3" marker-end="url(#arrow2)"></line>
-    <line x1="930" y1="282" x2="980" y2="282" stroke="#5c48bd" stroke-width="3" marker-end="url(#arrow2)"></line>
-  </svg>
-  <p class="diagram-caption">主链路可以压成 8 个动作：<strong>认证</strong>、<strong>参数校验</strong>、<strong>资源视图查询</strong>、<strong>主机调度</strong>、<strong>端口准备</strong>、<strong>镜像或卷准备</strong>、<strong>libvirt 启动</strong>、<strong>状态回写</strong>。</p>
-</div>
+主链路可以压成 8 个动作：`认证`、`参数校验`、`资源视图查询`、`主机调度`、`端口准备`、`镜像或卷准备`、`libvirt 启动`、`状态回写`。
 
 完整过程通常是：
 
@@ -463,50 +333,28 @@ Placement 维护的是资源提供者视图：
 
 ### 5.3 Cinder 备份原理
 
-<div class="diagram-card">
-  <svg viewBox="0 0 1220 430" role="img" aria-labelledby="backup-title backup-desc">
-    <title id="backup-title">Cinder 备份链路</title>
-    <desc id="backup-desc">卷数据从存储后端经过快照或读取，被 cinder-backup 写入 Swift、Ceph 或其他备份目标。</desc>
-    <defs>
-      <marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#1f7c61"></path>
-      </marker>
-    </defs>
-    <rect x="20" y="20" width="1180" height="390" rx="28" fill="#fffefa" stroke="#e7dccb" stroke-width="2"></rect>
+```text
+运行中的卷 Volume
+     |
+     +--> 可选：先做 Snapshot，得到一致性点
+     |
+     v
+cinder-backup
+     |
+     +--> chunk / compress / stream
+     |
+     v
+Backup Backend
+(Swift / Ceph / NFS / Posix)
+     |
+     +--> DB 里记录 backup chain 和元数据
+     |
+     v
+Restore
+-> 写回新卷或目标卷
+```
 
-    <rect x="60" y="150" width="220" height="96" rx="20" fill="#ffffff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="170" y="188" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">Volume</text>
-    <text x="170" y="214" text-anchor="middle" font-size="16" fill="#56786c">运行中的卷 / 数据块</text>
-
-    <rect x="340" y="80" width="220" height="96" rx="20" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="450" y="118" text-anchor="middle" font-size="24" font-weight="700" fill="#2f6f8d">Snapshot</text>
-    <text x="450" y="144" text-anchor="middle" font-size="16" fill="#567086">一致性点 / changed blocks</text>
-
-    <rect x="340" y="220" width="220" height="96" rx="20" fill="#ffffff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="450" y="258" text-anchor="middle" font-size="24" font-weight="700" fill="#2f6f8d">cinder-backup</text>
-    <text x="450" y="284" text-anchor="middle" font-size="16" fill="#567086">chunk / compress / stream</text>
-
-    <rect x="630" y="150" width="240" height="96" rx="20" fill="#ffffff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="750" y="188" text-anchor="middle" font-size="24" font-weight="700" fill="#5c48bd">Backup Backend</text>
-    <text x="750" y="214" text-anchor="middle" font-size="16" fill="#67638d">Swift / Ceph / NFS / Posix</text>
-
-    <rect x="940" y="80" width="220" height="96" rx="20" fill="#ffffff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="1050" y="118" text-anchor="middle" font-size="24" font-weight="700" fill="#913960">Metadata</text>
-    <text x="1050" y="144" text-anchor="middle" font-size="16" fill="#84657b">DB 记录 backup chain</text>
-
-    <rect x="940" y="220" width="220" height="96" rx="20" fill="#ffffff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="1050" y="258" text-anchor="middle" font-size="24" font-weight="700" fill="#913960">Restore</text>
-    <text x="1050" y="284" text-anchor="middle" font-size="16" fill="#84657b">写回新卷或原卷</text>
-
-    <line x1="280" y1="198" x2="340" y2="128" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-    <line x1="280" y1="198" x2="340" y2="268" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-    <line x1="560" y1="128" x2="630" y2="198" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-    <line x1="560" y1="268" x2="630" y2="198" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-    <line x1="870" y1="198" x2="940" y2="128" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-    <line x1="870" y1="198" x2="940" y2="268" stroke="#1f7c61" stroke-width="4" marker-end="url(#arrow3)"></line>
-  </svg>
-  <p class="diagram-caption">Cinder 备份的控制逻辑在 <strong>cinder-backup</strong>，但备份性能和可恢复性高度依赖底层后端能力。面试时一定区分“控制面备份对象”和“真实数据所在故障域”。</p>
-</div>
+Cinder 备份的控制逻辑在 `cinder-backup`，但备份性能和可恢复性高度依赖底层后端能力。面试时一定区分“控制面备份对象”和“真实数据所在故障域”。
 
 你可以这样讲原理：
 
@@ -584,54 +432,49 @@ Placement 维护的是资源提供者视图：
 
 ### 6.3 一包流量到底怎么走
 
-<div class="diagram-card">
-  <svg viewBox="0 0 1220 500" role="img" aria-labelledby="net-title net-desc">
-    <title id="net-title">Neutron 数据路径示意图</title>
-    <desc id="net-desc">展示虚机 vNIC 进入 OVS/OVN 数据路径，经 overlay 到另一台宿主机或通过路由器到外部网络。</desc>
-    <defs>
-      <marker id="arrow4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-        <path d="M 0 0 L 10 5 L 0 10 z" fill="#2f6f8d"></path>
-      </marker>
-    </defs>
-    <rect x="20" y="20" width="1180" height="460" rx="28" fill="#fffefa" stroke="#e5ddcf" stroke-width="2"></rect>
+```text
+东西向 East-West:
 
-    <rect x="60" y="130" width="220" height="90" rx="20" fill="#fff" stroke="#7c6adb" stroke-width="2"></rect>
-    <text x="170" y="168" text-anchor="middle" font-size="24" font-weight="700" fill="#5c48bd">VM A</text>
-    <text x="170" y="194" text-anchor="middle" font-size="16" fill="#6f6a95">tap / vNIC / SG</text>
+VM A
+  |
+  v
+tap / vNIC / security group
+  |
+  v
+br-int / OVN logical switch
+  |
+  v
+br-tun / VXLAN or GENEVE encapsulation
+  |
+  v
+宿主机 B 解封装
+  |
+  v
+VM B
 
-    <rect x="340" y="70" width="240" height="90" rx="20" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="460" y="108" text-anchor="middle" font-size="24" font-weight="700" fill="#2f6f8d">br-int / OVN LS</text>
-    <text x="460" y="134" text-anchor="middle" font-size="16" fill="#5d7088">port binding / ACL</text>
 
-    <rect x="340" y="200" width="240" height="90" rx="20" fill="#fff" stroke="#5ba8c8" stroke-width="2"></rect>
-    <text x="460" y="238" text-anchor="middle" font-size="24" font-weight="700" fill="#2f6f8d">br-tun / Geneve</text>
-    <text x="460" y="264" text-anchor="middle" font-size="16" fill="#5d7088">overlay encapsulation</text>
+南北向 North-South:
 
-    <rect x="640" y="140" width="240" height="90" rx="20" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="760" y="178" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">宿主机 B</text>
-    <text x="760" y="204" text-anchor="middle" font-size="16" fill="#55786c">decap / remote port</text>
+VM
+  |
+  v
+tap / br-int
+  |
+  v
+virtual router / distributed router
+  |
+  +--> metadata / DHCP
+  |
+  +--> SNAT / Floating IP
+  |
+  v
+br-ex or provider network
+  |
+  v
+物理网络 / 外部网络
+```
 
-    <rect x="940" y="70" width="220" height="90" rx="20" fill="#fff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="1050" y="108" text-anchor="middle" font-size="24" font-weight="700" fill="#913960">VM B</text>
-    <text x="1050" y="134" text-anchor="middle" font-size="16" fill="#84657b">东西向通信</text>
-
-    <rect x="940" y="230" width="220" height="90" rx="20" fill="#fff" stroke="#d97896" stroke-width="2"></rect>
-    <text x="1050" y="268" text-anchor="middle" font-size="24" font-weight="700" fill="#913960">Router / br-ex</text>
-    <text x="1050" y="294" text-anchor="middle" font-size="16" fill="#84657b">SNAT / FIP / 外网</text>
-
-    <rect x="640" y="330" width="240" height="90" rx="20" fill="#fff" stroke="#5db89a" stroke-width="2"></rect>
-    <text x="760" y="368" text-anchor="middle" font-size="24" font-weight="700" fill="#1f7c61">Metadata / DHCP</text>
-    <text x="760" y="394" text-anchor="middle" font-size="16" fill="#55786c">169.254.169.254 / IP 分配</text>
-
-    <line x1="280" y1="175" x2="340" y2="115" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-    <line x1="280" y1="175" x2="340" y2="245" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-    <line x1="580" y1="245" x2="640" y2="185" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-    <line x1="880" y1="185" x2="940" y2="115" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-    <line x1="760" y1="230" x2="760" y2="330" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-    <line x1="880" y1="185" x2="940" y2="275" stroke="#2f6f8d" stroke-width="4" marker-end="url(#arrow4)"></line>
-  </svg>
-  <p class="diagram-caption">东西向走 overlay，南北向通常经过 router namespace、分布式路由或网关节点，再经 <strong>br-ex</strong> 或 provider 接口出云。排障时先判断问题在 <strong>L2 接入</strong>、<strong>overlay 封装</strong>、<strong>L3/NAT</strong>，还是在 <strong>security group / metadata</strong>。</p>
-</div>
+东西向走 overlay，南北向通常经过 router namespace、分布式路由或网关节点，再经 `br-ex` 或 provider 接口出云。排障时先判断问题在 `L2 接入`、`overlay 封装`、`L3/NAT`，还是在 `security group / metadata`。
 
 #### 东西向流量
 
