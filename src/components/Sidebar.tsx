@@ -34,11 +34,14 @@ const categoryEmoji: Record<string, string> = {
   React: "⚛️",
   TypeScript: "💎",
   Network: "🌐",
+  Storage: "💽",
+  Cloud: "☁️",
   Algorithm: "🧩",
   CSS: "🎨",
   Node: "🍀",
   Database: "📦",
   OperatingSystem: "🖥️",
+  软件功能: "🧰",
 };
 
 const categoryVariants: Variants = {
